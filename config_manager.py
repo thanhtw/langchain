@@ -20,7 +20,7 @@ from config.constants import (
 from data.data_processor import DataProcessor
 from llms import LangChainLLM, LangChainManager
 from utils.model_downloader import download_model_with_streamlit, get_recommended_model_parameters, RECOMMENDED_MODELS
-
+from prompts.prompt_engineering import PromptTemplate, PromptLibrary
 
 class ConfigManager:
     """
@@ -165,6 +165,11 @@ class ConfigManager:
         
         # Data Source Section
         self.data_processor.render_data_source_section(section_num)
+        section_num += 1
+        
+        # Quality Analysis Section (NEW)
+        from quality_analysis_ui import render_quality_analysis_section
+        render_quality_analysis_section(section_num)
         section_num += 1
         
         # LLM Setup Section
@@ -839,6 +844,10 @@ class ConfigManager:
 
         # Allow user to select columns
         self._render_column_selector()
+        
+        # Add quality check widget integrated into chatbot
+        from auto_quality_check import render_quality_check_widget_in_chatbot
+        render_quality_check_widget_in_chatbot()
 
         # Initialize chat history if needed
         if "chat_history" not in st.session_state:
@@ -920,8 +929,60 @@ class ConfigManager:
                 if not metadatas or not retrieved_data:
                     search_status.warning("No relevant information found.")
                     return
+                
+                # Check if this is a code quality analysis request
+                is_quality_analysis = any(kw in prompt.lower() for kw in 
+                                        ["error", "violation", "quality", "build", "checkstyle", 
+                                        "fix", "issue", "improve", "code problem"])
+                
+                # Handle quality analysis
+                if is_quality_analysis:
+                    search_status.info("Analyzing code quality information...")
                     
-                enhanced_prompt = f"""The prompt of the user is: "{prompt}". Answer it based on the following retrieved data: \n{retrieved_data}"""
+                    # Check for quality report analysis in session state
+                    json_analysis = ""
+                    if hasattr(st.session_state, 'quality_report_analysis') and st.session_state.quality_report_analysis:
+                        json_analysis = st.session_state.quality_report_analysis
+                    else:
+                        # Look for JSON files in current directory
+                        from utils.utils import find_quality_report, analyze_json_data
+                        
+                        file_path, report_data = find_quality_report()
+                        
+                        if file_path and report_data:
+                            search_status.info(f"Found quality report: {file_path}")
+                            json_analysis = analyze_json_data(report_data)
+                            
+                            # Store in session state for future use
+                            st.session_state.quality_report_path = file_path
+                            st.session_state.quality_report_analysis = json_analysis
+                    
+                    if json_analysis:
+                        # Create a specialized prompt for quality analysis
+                        enhanced_prompt = f"""You are a professional code quality analyst and programming instructor. Analyze the following code quality issues and provide detailed explanations and solutions.
+
+    USER QUERY: {prompt}
+
+    CODE QUALITY ANALYSIS:
+    {json_analysis}
+
+    DATA RETRIEVAL:
+    {retrieved_data}
+
+    Please provide a comprehensive analysis of the build errors and checkstyle violations found in the report. For each issue:
+    1. Explain what the error or violation means in simple terms
+    2. Explain why it's important to fix it (impact on code quality, reliability, etc.)
+    3. Provide a step-by-step solution to fix the issue
+    4. If possible, show both the incorrect code and the corrected code
+
+    Also include a summary of the overall code quality issues and general recommendations for improving the code. 
+    Be educational and helpful, as if you're teaching a student how to write better code."""
+                    else:
+                        # No JSON analysis available, use standard prompt format
+                        enhanced_prompt = f"The prompt of the user is: \"{prompt}\". Answer it based on the following retrieved data: \n{retrieved_data}"
+                else:
+                    # Use standard prompt format for non-quality analysis queries
+                    enhanced_prompt = f"The prompt of the user is: \"{prompt}\". Answer it based on the following retrieved data: \n{retrieved_data}"
                 
                 # Display search results
                 search_status.success("Found relevant information!")
@@ -931,17 +992,25 @@ class ConfigManager:
                 if metadatas and metadatas[0]:
                     st.sidebar.dataframe(pd.DataFrame(metadatas[0]))
                 
+                # If quality analysis, also show quality report in sidebar
+                if is_quality_analysis and hasattr(st.session_state, 'quality_report_analysis') and st.session_state.quality_report_analysis:
+                    with st.sidebar.expander("Quality Report Analysis"):
+                        st.text_area("Analysis", st.session_state.quality_report_analysis, height=200)
+                
                 # Call LLM for response
                 try:
+                    search_status.info("Generating response...")
                     response = st.session_state.llm_model.generate_content(enhanced_prompt)
                     search_status.empty()
                     st.markdown(response)
                     st.session_state.chat_history.append({"role": ASSISTANT, "content": response})
                 except Exception as e:
                     search_status.error(f"Error from LLM: {str(e)}")
-               
+            
             except Exception as e:
                 search_status.error(f"An error occurred: {str(e)}")
+                import traceback
+                st.error(traceback.format_exc())
 
     def get_llm_options(self):
         """
@@ -952,41 +1021,78 @@ class ConfigManager:
         """
         return LANGCHAIN_PROVIDERS
     
-
-    def _format_prompt_with_template(self, query, context):
+    def create_quality_template(self):
         """
-        Format the prompt using the selected template with function calling support.
+        Create and return a specialized prompt template for code quality analysis.
+        
+        Returns:
+            PromptTemplate: A new template for code quality analysis
+        """
+        return PromptTemplate(
+            name="code_quality",
+            description="Specialized prompt for code quality analysis",
+            template=(
+                "You are a professional code quality analyst and programming instructor. "
+                "Analyze the following code quality issues and provide detailed explanations and solutions.\n\n"
+                "USER QUERY: {query}\n\n"
+                "CODE QUALITY ANALYSIS:\n{context}\n\n"
+                "Please provide a comprehensive analysis of the build errors and checkstyle violations found in the report. "
+                "For each issue:\n"
+                "1. Explain what the error or violation means in simple terms\n"
+                "2. Explain why it's important to fix it (impact on code quality, reliability, etc.)\n"
+                "3. Provide a step-by-step solution to fix the issue\n"
+                "4. If possible, show both the incorrect code and the corrected code\n\n"
+                "Also include a summary of the overall code quality issues and general recommendations for improving the code. "
+                "Be educational and helpful, as if you're teaching a student how to write better code."
+            )
+        )
+
+    def register_quality_template(self, prompt_library=None):
+        """
+        Register the code quality template with the prompt library.
+        
+        Args:
+            prompt_library (PromptLibrary, optional): Library to register with
+            
+        Returns:
+            bool: True if registration was successful
+        """
+        if prompt_library is None:
+            prompt_library = PromptLibrary()
+        
+        # Check if template already exists
+        if not prompt_library.get_template("code_quality"):
+            template = self.create_quality_template()
+            prompt_library.add_template(template)
+            return True
+        
+        return False
+
+    # Function to format quality analysis prompt
+    def format_quality_analysis_prompt(self, query, code_analysis, additional_context=""):
+        """
+        Format a quality analysis prompt with the specialized template.
         
         Args:
             query (str): User's query
-            context (str): Retrieved context
+            code_analysis (str): Code quality analysis text
+            additional_context (str, optional): Additional context information
             
         Returns:
-            str: Formatted prompt for the LLM
+            str: Formatted prompt for quality analysis
         """
-        try:
-            # Import here to avoid circular imports
-            from prompts.prompt_engineering import PromptLibrary
-            
-            # Get selected template name from session state
-            template_name = st.session_state.get("selected_prompt_template", "standard")
-            
-            # Initialize prompt library
-            prompt_library = PromptLibrary()
-            
-            # Get the template
-            template = prompt_library.get_template(template_name)
-            
-            if not template:
-                # Fallback to default RAG prompt
-                return f"The prompt of the user is: \"{query}\". Answer it based on the following retrieved data: \n{context}"
-            
-            # Format using template with function support
-            formatted_prompt = template.format(query=query, context=context)
-            
-            return formatted_prompt
-            
-        except Exception as e:
-            st.error(f"Error formatting prompt: {e}")
-            # Fallback to simple prompt
-            return f"Please answer this question: \"{query}\"\nBased on this information: {context}"
+        # Ensure template is registered
+        prompt_library = PromptLibrary()
+        self.register_quality_template(prompt_library)
+        
+        # Get the template
+        template = prompt_library.get_template("code_quality")
+        
+        # Combine code analysis with additional context
+        if additional_context:
+            context = f"{code_analysis}\n\nADDITIONAL DOCUMENTATION:\n{additional_context}"
+        else:
+            context = code_analysis
+        
+        # Format and return
+        return template.format(query=query, context=context)

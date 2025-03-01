@@ -9,10 +9,12 @@ import streamlit as st
 import os
 import sys
 import platform
+import json
 from pathlib import Path
 from dotenv import load_dotenv
 from config_manager import ConfigManager
 from utils.model_downloader import check_ollama_running, start_ollama
+
 
 # Add the current directory to the Python path
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -158,7 +160,8 @@ def main():
     # Render main content
     config_manager.render_main_content()
 
-    config_manager._format_prompt_with_template()
+    # Remove this problematic call
+    # config_manager._format_prompt_with_template()
 
 
 if __name__ == "__main__":
