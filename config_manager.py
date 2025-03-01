@@ -167,11 +167,6 @@ class ConfigManager:
         self.data_processor.render_data_source_section(section_num)
         section_num += 1
         
-        # Quality Analysis Section (NEW)
-        from quality_analysis_ui import render_quality_analysis_section
-        render_quality_analysis_section(section_num)
-        section_num += 1
-        
         # LLM Setup Section
         self._render_llm_setup_section(section_num)
         section_num += 1
@@ -261,35 +256,6 @@ class ConfigManager:
                             st.rerun()
                         else:
                             st.error(f"Failed to pull {selected_model['name']}")
-            
-            # Model parameters
-            st.subheader("Model Parameters")
-            
-            # Temperature slider
-            temperature = st.slider(
-                "Temperature:",
-                min_value=0.0,
-                max_value=1.0,
-                value=0.7,
-                step=0.1,
-                help="Higher values make output more random, lower values more deterministic."
-            )
-            
-            # Max tokens slider
-            max_tokens = st.slider(
-                "Max Tokens:",
-                min_value=64,
-                max_value=4096,
-                value=512,
-                step=64,
-                help="Maximum number of tokens to generate."
-            )
-            
-            # Store parameters
-            st.session_state.model_params = {
-                "temperature": temperature,
-                "max_tokens": max_tokens
-            }
             
             # Initialize button - only enable if model is pulled
             if st.button("Initialize Selected Model", disabled=not is_pulled):
