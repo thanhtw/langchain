@@ -19,7 +19,6 @@ import streamlit as st
 Utilities for analyzing code quality reports and executing external tools.
 """
 
-
 def process_batch(batch_df, model, collection):
     """
     Encode and save a batch of data to Chroma.
@@ -50,7 +49,6 @@ def process_batch(batch_df, model, collection):
             raise RuntimeError("Please set up the language model before running the processing.")
         raise RuntimeError(f"Error saving data to Chroma for a batch: {str(e)}")
 
-    
 def divide_dataframe(df, batch_size):
     """
     Divide DataFrame into smaller chunks based on the specified batch size.
@@ -64,7 +62,6 @@ def divide_dataframe(df, batch_size):
     """
     num_batches = math.ceil(len(df) / batch_size)
     return [df.iloc[i * batch_size:(i + 1) * batch_size] for i in range(num_batches)]
-
 
 def clean_collection_name(name):
     """
@@ -92,8 +89,6 @@ def clean_collection_name(name):
     else:
         return f"collection_{uuid.uuid4().hex[:8]}"  # Fallback to random name
     
-
-
 def analyze_json_data(json_data):
     """
     Analyze JSON data for errors and violations from a quality check report.

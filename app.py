@@ -9,7 +9,6 @@ import streamlit as st
 import os
 import sys
 import platform
-import json
 from pathlib import Path
 from dotenv import load_dotenv
 from config_manager import ConfigManager
@@ -159,10 +158,6 @@ def main():
 
     # Render main content
     config_manager.render_main_content()
-
-    # Remove this problematic call
-    # config_manager._format_prompt_with_template()
-
 
 if __name__ == "__main__":
     main()

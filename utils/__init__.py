@@ -19,6 +19,33 @@ from utils.model_downloader import (
     RECOMMENDED_MODELS
 )
 
+from utils.auto_quality_check import (
+    run_quality_check_with_analysis, 
+    generate_search_query,
+    vector_search,
+    format_search_results,
+    get_build_checkstyle_dir,
+    run_quality_check,
+    analyze_quality_report,
+    render_quality_check_widget_in_chatbot
+    )
+
+from utils.enhanced_vector_search import(
+    compute_similarity,
+    rank_search_results,
+    enhanced_vector_search,
+    format_search_results
+     
+)
+
+from utils.optimized_chunking import (
+    get_chunker, 
+    BaseChunker, 
+    RecursiveTokenChunker, 
+    SemanticChunker, 
+    NoChunker
+)
+
 __all__ = [
     # General utilities
     'process_batch',
@@ -32,5 +59,29 @@ __all__ = [
     'download_model_with_streamlit',
     'get_model_family',
     'get_recommended_model_parameters',
-    'RECOMMENDED_MODELS'
+    'RECOMMENDED_MODELS',
+
+    #auto quality check
+    'run_quality_check_with_analysis', 
+    'generate_search_query',
+    'vector_search',
+    'format_search_results',
+    'get_build_checkstyle_dir',
+    'run_quality_check',
+    'analyze_quality_report',
+    'render_quality_check_widget_in_chatbot',
+
+    #enhance vector
+    'compute_similarity',
+    'rank_search_results',
+    'enhanced_vector_search',
+    'format_search_results',
+
+    #chunking
+    'get_chunker', 
+    'BaseChunker', 
+    'RecursiveTokenChunker', 
+    'SemanticChunker', 
+    'NoChunker'
+     
 ]

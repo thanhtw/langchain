@@ -1,5 +1,5 @@
 """
-Utility for downloading LLM models for local use.
+Utility for downloading and managing LLM models for local use.
 """
 
 import os
@@ -179,6 +179,24 @@ def download_model_with_streamlit(model_info: Dict[str, Any], models_dir: str = 
         # Create directory if it doesn't exist
         os.makedirs(models_dir, exist_ok=True)
         
+        # Check if file already exists with correct size
+        if os.path.exists(destination):
+            try:
+                # Get expected file size from server
+                response = requests.head(url)
+                expected_size = int(response.headers.get('content-length', 0))
+                current_size = os.path.getsize(destination)
+                
+                # If file size matches, skip download
+                if current_size == expected_size:
+                    st.success(f"Model {model_name} already downloaded")
+                    return destination
+                    
+                st.warning(f"Model file exists but with incorrect size. Downloading again.")
+            except Exception:
+                # If we can't check size, assume we need to download
+                pass
+        
         # Show download message
         progress_text = f"Downloading {model_name}..."
         progress_bar = st.progress(0, text=progress_text)
@@ -187,10 +205,9 @@ def download_model_with_streamlit(model_info: Dict[str, Any], models_dir: str = 
         response = requests.get(url, stream=True)
         total_size = int(response.headers.get('content-length', 0))
         
-        # If file exists and size matches, skip download
-        if os.path.exists(destination) and os.path.getsize(destination) == total_size:
-            st.success(f"Model {model_name} already downloaded")
-            return destination
+        if total_size == 0:
+            st.error(f"Invalid content length for model {model_name}")
+            return None
             
         downloaded_size = 0
         with open(destination, 'wb') as f:
@@ -200,10 +217,15 @@ def download_model_with_streamlit(model_info: Dict[str, Any], models_dir: str = 
                     downloaded_size += len(chunk)
                     progress = int((downloaded_size / total_size) * 100)
                     progress_bar.progress(min(progress/100, 1.0), 
-                                          text=f"Downloading {model_name}: {progress}%")
+                                         text=f"Downloading {model_name}: {progress}%")
         
-        st.success(f"Successfully downloaded {model_name}")
-        return destination
+        # Verify downloaded file
+        if os.path.exists(destination) and os.path.getsize(destination) > 0:
+            st.success(f"Successfully downloaded {model_name}")
+            return destination
+        else:
+            st.error(f"Download appears to have failed for {model_name}")
+            return None
         
     except Exception as e:
         st.error(f"Failed to download model: {str(e)}")

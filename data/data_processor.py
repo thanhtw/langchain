@@ -12,12 +12,16 @@ import uuid
 import io
 import os
 import time
+import re
+from pathlib import Path
+from typing import List, Dict, Any, Tuple, Optional, Union
 from docx import Document
 import pdfplumber
-from chunking import RecursiveTokenChunker, LLMAgenticChunkerv2, ProtonxSemanticChunker
-from utils import process_batch, divide_dataframe, clean_collection_name
-from config.constants import NO_CHUNKING, DB
+import chromadb
 
+# Import our optimized chunking module
+from utils.optimized_chunking import get_chunker
+from utils.enhanced_vector_search import enhanced_vector_search
 
 class DataProcessor:
     """
@@ -32,7 +36,7 @@ class DataProcessor:
             config_manager: Reference to ConfigManager instance
         """
         self.config_manager = config_manager
-        self.llm_options = config_manager.get_llm_options()
+        self.chroma_client = chromadb.PersistentClient("db")
         self._initialize_state()
 
     def _initialize_state(self):
@@ -58,7 +62,7 @@ class DataProcessor:
         if not self._check_prerequisites():
             return
 
-        st.header(f"{section_num}. Setup data source")
+        st.header(f"{section_num}. Setup Data Source")
         
         # Tab selection for upload or load
         tab1, tab2 = st.tabs(["Upload New Data", "Load Existing Collections"])
@@ -86,7 +90,7 @@ class DataProcessor:
 
     def _render_upload_tab(self):
         """Render the upload tab content."""
-        st.subheader("Upload data", divider=True)
+        st.subheader("Upload Data", divider=True)
         uploaded_files = st.file_uploader(
             "Upload CSV, JSON, PDF, or DOCX files", 
             accept_multiple_files=True
@@ -97,9 +101,9 @@ class DataProcessor:
 
         if len(st.session_state.chunks_df) > 0:
             st.write("Number of chunks:", len(st.session_state.chunks_df))
-            st.dataframe(st.session_state.chunks_df)
+            st.dataframe(st.session_state.chunks_df.head(10))
 
-        if st.button("Save Data"):
+        if st.button("Save Data", disabled=len(st.session_state.chunks_df) == 0):
             self._save_data_to_collections(uploaded_files)
 
     def _process_uploaded_files(self, uploaded_files):
@@ -114,12 +118,20 @@ class DataProcessor:
         for uploaded_file in uploaded_files:
             df = self._parse_file(uploaded_file)
             if df is not None:
+                # Add source file name to dataframe for tracking
+                df['source_file'] = uploaded_file.name
                 all_data.append(df)
 
         if all_data:
             # Combine all data
             df = pd.concat(all_data, ignore_index=True)
-            st.dataframe(df)
+            
+            # Display file stats
+            st.write(f"Loaded {len(uploaded_files)} files with {len(df)} total rows.")
+            
+            # Preview the data
+            with st.expander("Preview Raw Data"):
+                st.dataframe(df.head(10))
 
             # Generate document IDs
             doc_ids = [str(uuid.uuid4()) for _ in range(len(df))]
@@ -147,7 +159,18 @@ class DataProcessor:
                 
             elif file_name.endswith(".json"):
                 json_data = json.load(uploaded_file)
-                return pd.json_normalize(json_data)
+                # Handle different JSON structures
+                if isinstance(json_data, list):
+                    return pd.json_normalize(json_data)
+                elif isinstance(json_data, dict):
+                    # Check if it's a nested structure or simple key-value
+                    if any(isinstance(v, (dict, list)) for v in json_data.values()):
+                        return pd.json_normalize(json_data)
+                    else:
+                        return pd.DataFrame([json_data])
+                else:
+                    st.error(f"Unsupported JSON structure in {file_name}")
+                    return None
                 
             elif file_name.endswith(".pdf"):
                 return self._parse_pdf_file(uploaded_file)
@@ -177,12 +200,19 @@ class DataProcessor:
             DataFrame: DataFrame with extracted text
         """
         pdf_text = []
+        page_numbers = []
+        
         with pdfplumber.open(io.BytesIO(uploaded_file.read())) as pdf:
-            for page in pdf.pages:
+            for i, page in enumerate(pdf.pages):
                 text = page.extract_text()
                 if text:
                     pdf_text.append(text)
-        return pd.DataFrame({"content": pdf_text})
+                    page_numbers.append(i + 1)
+        
+        return pd.DataFrame({
+            "content": pdf_text,
+            "page_number": page_numbers
+        })
     
     def _parse_docx_file(self, uploaded_file):
         """
@@ -195,8 +225,20 @@ class DataProcessor:
             DataFrame: DataFrame with extracted text
         """
         doc = Document(io.BytesIO(uploaded_file.read()))
-        docx_text = [para.text for para in doc.paragraphs if para.text]
-        return pd.DataFrame({"content": docx_text})
+        
+        # Extract paragraphs and their styles
+        paragraphs = []
+        styles = []
+        
+        for para in doc.paragraphs:
+            if para.text.strip():
+                paragraphs.append(para.text)
+                styles.append(para.style.name if para.style else "Normal")
+        
+        return pd.DataFrame({
+            "content": paragraphs,
+            "style": styles
+        })
 
     def _save_data_to_collections(self, uploaded_files):
         """
@@ -206,7 +248,7 @@ class DataProcessor:
             uploaded_files: List of uploaded file objects
         """
         try:
-            if not len(st.session_state.chunks_df):
+            if st.session_state.chunks_df.empty:
                 st.warning("No data available to process.")
                 return
 
@@ -215,9 +257,9 @@ class DataProcessor:
             st.session_state.random_collection_name = collection_name
 
             # Create or get collection
-            collection = st.session_state.client.get_or_create_collection(
+            collection = self.chroma_client.get_or_create_collection(
                 name=collection_name,
-                metadata={"description": "A collection for RAG system"}
+                metadata={"description": "Collection for RAG system"}
             )
 
             # Add to active collections
@@ -240,7 +282,7 @@ class DataProcessor:
             collection: Chroma collection to save data to
         """
         batch_size = 256
-        df_batches = divide_dataframe(st.session_state.chunks_df, batch_size)
+        df_batches = self._divide_dataframe(st.session_state.chunks_df, batch_size)
         
         if not df_batches:
             st.warning("No data available to process.")
@@ -252,7 +294,7 @@ class DataProcessor:
 
         for i, batch_df in enumerate(df_batches):
             if not batch_df.empty:
-                process_batch(batch_df, st.session_state.embedding_model, collection)
+                self._process_batch(batch_df, st.session_state.embedding_model, collection)
                 progress_percentage = int(((i + 1) / num_batches) * 100)
                 progress_bar.progress(
                     progress_percentage / 100, 
@@ -261,6 +303,53 @@ class DataProcessor:
                 time.sleep(0.1)
 
         progress_bar.empty()
+        
+    def _process_batch(self, batch_df, model, collection):
+        """
+        Encode and save a batch of data to Chroma.
+        
+        Args:
+            batch_df (DataFrame): DataFrame containing batch data
+            model: Embedding model to use
+            collection: Chroma collection to add data to
+        """
+        try:
+            # Encode column data to vectors for this batch
+            embeddings = model.encode(batch_df['chunk'].tolist())
+
+            # Collect all metadata in one list
+            metadatas = [row.to_dict() for _, row in batch_df.iterrows()]
+
+            # Generate unique ids for the batch
+            batch_ids = [str(uuid.uuid4()) for _ in range(len(batch_df))]
+
+            # Add the batch to Chroma
+            collection.add(
+                ids=batch_ids,
+                embeddings=embeddings,
+                metadatas=metadatas
+            )
+        except Exception as e:
+            if str(e) == "'NoneType' object has no attribute 'encode'":
+                raise RuntimeError("Please set up the language model before running the processing.")
+            raise RuntimeError(f"Error saving data to Chroma for a batch: {str(e)}")
+
+    def _divide_dataframe(self, df, batch_size):
+        """
+        Divide DataFrame into smaller chunks based on the specified batch size.
+        
+        Args:
+            df (DataFrame): DataFrame to divide
+            batch_size (int): Size of each batch
+            
+        Returns:
+            list: List of DataFrame batches
+        """
+        if df.empty:
+            return []
+            
+        total_size = len(df)
+        return [df.iloc[i:i+batch_size] for i in range(0, total_size, batch_size)]
 
     def _generate_collection_name(self, uploaded_files):
         """
@@ -274,8 +363,34 @@ class DataProcessor:
         """
         if uploaded_files:
             first_file_name = os.path.splitext(uploaded_files[0].name)[0]
-            return f"rag_collection_{clean_collection_name(first_file_name)}"
+            return f"rag_collection_{self._clean_collection_name(first_file_name)}"
         return f"rag_collection_{uuid.uuid4().hex[:8]}"
+        
+    def _clean_collection_name(self, name):
+        """
+        Clean a collection name to ensure it's valid for Chroma.
+        
+        Args:
+            name (str): Original collection name
+            
+        Returns:
+            str: Cleaned collection name or None if invalid
+        """
+        if not name:
+            return None
+            
+        # Allow only alphanumeric, underscores, hyphens, and single periods
+        cleaned_name = re.sub(r'[^a-zA-Z0-9_.-]', '', name)
+        cleaned_name = re.sub(r'\.{2,}', '.', cleaned_name)
+        cleaned_name = re.sub(r'^[^a-zA-Z0-9]+|[^a-zA-Z0-9]+$', '', cleaned_name)
+
+        # Ensure the cleaned name meets length constraints (3-63 chars)
+        if 3 <= len(cleaned_name) <= 63:
+            return cleaned_name
+        elif len(cleaned_name) > 63:
+            return cleaned_name[:63]
+        else:
+            return f"collection_{uuid.uuid4().hex[:8]}"  # Fallback to random name
 
     def _setup_chunking(self, df):
         """
@@ -284,7 +399,7 @@ class DataProcessor:
         Args:
             df (DataFrame): DataFrame to process
         """
-        st.subheader("Chunking")
+        st.subheader("Chunking Options")
 
         if not df.empty:
             # Column selection for vector search
@@ -295,134 +410,134 @@ class DataProcessor:
             st.write(f"Selected column for indexing: {index_column}")
 
             # Chunking options
-            chunk_options = [
-                NO_CHUNKING,
-                "RecursiveTokenChunker", 
-                "SemanticChunker",
-                "AgenticChunker",
-            ]
+            chunk_options = {
+                "no_chunking": "No Chunking (keep original document)",
+                "recursive": "Recursive Token Chunker (splits by paragraph, sentence, etc.)",
+                "semantic": "Semantic Chunker (groups by meaning)"
+            }
 
-            # Handle chunking option selection
-            currentChunkerIdx = self._get_chunker_index(chunk_options)
-            
             selected_option = st.radio(
-                "Please select one of the options below.",
-                chunk_options,
-                captions=[
-                    "Keep the original document",
-                    "Recursively chunks text into smaller, meaningful token groups",
-                    "Chunking with semantic comparison between chunks",
-                    "Let LLM decide chunking"
-                ],
-                key="chunkOption",
-                index=currentChunkerIdx
+                "Select a chunking strategy:",
+                options=list(chunk_options.keys()),
+                format_func=lambda x: chunk_options[x],
+                key="chunking_strategy"
             )
-
-            # Process chunks based on selection
-            chunks_df = self._process_chunks(df, index_column, selected_option)
-            if chunks_df is not None:
-                st.session_state.chunks_df = chunks_df
-
-    def _get_chunker_index(self, chunk_options):
-        """
-        Determine the index for chunking options.
-        
-        Args:
-            chunk_options (list): List of chunking options
             
-        Returns:
-            int: Index of selected chunking option
-        """
-        if not st.session_state.get("chunkOption"):
-            st.session_state.chunkOption = NO_CHUNKING
-            return 0
-        else:
-            return chunk_options.index(st.session_state.get("chunkOption"))
+            # Chunking parameters
+            with st.expander("Chunking Parameters"):
+                if selected_option == "no_chunking":
+                    st.info("No parameters needed for this chunking strategy.")
+                elif selected_option == "recursive":
+                    chunk_size = st.slider(
+                        "Chunk Size (tokens)", 
+                        min_value=50, 
+                        max_value=1000, 
+                        value=st.session_state.get("chunk_size", 200),
+                        step=50,
+                        help="Target size for each chunk"
+                    )
+                    chunk_overlap = st.slider(
+                        "Chunk Overlap", 
+                        min_value=0, 
+                        max_value=100, 
+                        value=st.session_state.get("chunk_overlap", 20),
+                        step=5,
+                        help="Number of tokens that overlap between chunks"
+                    )
+                    st.session_state.chunk_size = chunk_size
+                    st.session_state.chunk_overlap = chunk_overlap
+                elif selected_option == "semantic":
+                    similarity_threshold = st.slider(
+                        "Similarity Threshold", 
+                        min_value=0.0, 
+                        max_value=1.0, 
+                        value=0.3,
+                        step=0.05,
+                        help="Threshold for determining chunk boundaries (higher = fewer chunks)"
+                    )
+                    st.session_state.similarity_threshold = similarity_threshold
 
-    def _process_chunks(self, df, index_column, chunk_option):
+            # Process button
+            if st.button("Process Chunks"):
+                with st.spinner("Processing chunks..."):
+                    chunks_df = self._process_chunks(df, index_column, selected_option)
+                    if chunks_df is not None and not chunks_df.empty:
+                        st.session_state.chunks_df = chunks_df
+                        st.success(f"Generated {len(chunks_df)} chunks!")
+                    else:
+                        st.error("No chunks were generated. Please check your data and settings.")
+
+    def _process_chunks(self, df, index_column, chunker_type):
         """
         Process text chunks based on selected chunking option.
         
         Args:
             df (DataFrame): DataFrame to process
             index_column (str): Column to use for chunking
-            chunk_option (str): Selected chunking option
+            chunker_type (str): Type of chunker to use
             
         Returns:
             DataFrame or None: DataFrame with chunks or None if no chunks
         """
-        chunk_records = []
-        embedding_option = None
-
-        if chunk_option == "SemanticChunker":
-            embedding_option = st.selectbox(
-                "Choose the embedding method for Semantic Chunker:",
-                ["TF-IDF", "Sentence-Transformers"]
-            )
-
-        for index, row in df.iterrows():
-            selected_column_value = row[index_column]
-            if not(isinstance(selected_column_value, str) and len(selected_column_value) > 0):
-                continue
-
-            chunks = self._get_chunks(selected_column_value, chunk_option, embedding_option)
-            for chunk in chunks:
-                chunk_record = {
-                    'chunk': chunk,
-                    **{k: v for k, v in row.to_dict().items() if k not in ['chunk', '_id']}
-                }
-                chunk_records.append(chunk_record)
-
-        return pd.DataFrame(chunk_records) if chunk_records else None
-
-    def _get_chunks(self, text, chunk_option, embedding_option=None):
-        """
-        Get chunks based on selected chunking option.
+        # Prepare chunker parameters
+        chunker_params = {}
         
-        Args:
-            text (str): Text to chunk
-            chunk_option (str): Selected chunking option
-            embedding_option (str, optional): Embedding option for semantic chunker
+        if chunker_type == "recursive":
+            chunker_params = {
+                "chunk_size": st.session_state.get("chunk_size", 200),
+                "chunk_overlap": st.session_state.get("chunk_overlap", 20)
+            }
+        elif chunker_type == "semantic":
+            chunker_params = {
+                "threshold": st.session_state.get("similarity_threshold", 0.3)
+            }
+        
+        # Get the appropriate chunker
+        chunker = get_chunker(chunker_type, **chunker_params)
+        
+        # Process chunks
+        chunk_records = []
+        progress_bar = st.progress(0)
+        
+        for i, (_, row) in enumerate(df.iterrows()):
+            # Update progress
+            progress_bar.progress(min((i + 1) / len(df), 1.0))
             
-        Returns:
-            list: List of text chunks
-        """
-        if chunk_option == NO_CHUNKING:
-            return [text]
+            # Get text to chunk
+            text_to_chunk = row.get(index_column)
+            if not isinstance(text_to_chunk, str) or not text_to_chunk.strip():
+                continue
+                
+            # Split text into chunks
+            chunks = chunker.split_text(text_to_chunk)
             
-        elif chunk_option == "RecursiveTokenChunker":
-            chunker = RecursiveTokenChunker(
-                chunk_size=st.session_state.chunk_size,
-                chunk_overlap=st.session_state.chunk_overlap
-            )
-            return chunker.split_text(text)
-            
-        elif chunk_option == "SemanticChunker":
-            if embedding_option == "TF-IDF":
-                chunker = ProtonxSemanticChunker(embedding_type="tfidf")
-            else:
-                chunker = ProtonxSemanticChunker(
-                    embedding_type="transformers",
-                    model="all-MiniLM-L6-v2"
-                )
-            return chunker.split_text(text)
-            
-        elif chunk_option == "AgenticChunker":
-            llm_model = st.session_state.get("llm_model")
-            if llm_model:
-                chunker = LLMAgenticChunkerv2(llm_model)
-                return chunker.split_text(text)
-            return [text]
-            
-        return [text]
+            # Create records for each chunk
+            for chunk in chunks:
+                if not chunk.strip():
+                    continue
+                    
+                # Create a record with all original metadata plus the chunk
+                record = {
+                    'chunk': chunk,
+                    'chunk_index': len(chunk_records),  # Track chunk order
+                    **{k: v for k, v in row.to_dict().items() if k not in ['chunk', 'chunk_index']}
+                }
+                chunk_records.append(record)
+        
+        progress_bar.empty()
+        
+        # Create DataFrame if we have records
+        if chunk_records:
+            result_df = pd.DataFrame(chunk_records)
+            # Add chunk length information
+            result_df['chunk_length'] = result_df['chunk'].apply(len)
+            return result_df
+        
+        return None
 
     def _render_collection_manager(self):
         """Render the collection management interface."""
         st.subheader("Manage Collections", divider=True)
-        
-        # Initialize preview state if not exists
-        if 'preview_collection' not in st.session_state:
-            st.session_state.preview_collection = None
         
         # Get all available collections
         collections = self._get_all_collections()
@@ -444,14 +559,14 @@ class DataProcessor:
         Returns:
             list: List of collection information dictionaries
         """
-        collections = st.session_state.client.list_collections()
+        collections = self.chroma_client.list_collections()
         collection_info = []
         
         # Gather information about each collection
         for collection in collections:
             try:
                 count = collection.count()
-                metadata = collection.get(include=["metadatas"])
+                metadata = collection.get(include=["metadatas"], limit=1)
                 sample_metadata = metadata["metadatas"][0] if metadata["metadatas"] else {}
                 collection_info.append({
                     "name": collection.name,
@@ -552,7 +667,7 @@ class DataProcessor:
         Args:
             collection_name (str): Name of collection to add
         """
-        collection = st.session_state.client.get_collection(name=collection_name)
+        collection = self.chroma_client.get_collection(name=collection_name)
         st.session_state.active_collections[collection_name] = collection
 
     def _remove_collection(self, collection_name):
@@ -573,7 +688,7 @@ class DataProcessor:
             collection_name (str): Name of collection to preview
         """
         try:
-            collection = st.session_state.client.get_collection(collection_name)
+            collection = self.chroma_client.get_collection(collection_name)
             if not collection:
                 st.error(f"Collection {collection_name} not found.")
                 return
@@ -582,7 +697,7 @@ class DataProcessor:
             try:
                 results = collection.get(
                     limit=5,
-                    include=['metadatas']  # Only get metadatas, no documents
+                    include=['metadatas', 'documents']
                 )
             except Exception as e:
                 st.error(f"Failed to fetch documents: {str(e)}")
@@ -594,19 +709,21 @@ class DataProcessor:
                 return
 
             metadatas = results['metadatas']
+            documents = results.get('documents', [])
 
             if not metadatas:
                 st.info("Collection is empty.")
                 return
 
-            # Create data for the dataframe using only metadata
-            data = [meta for meta in metadatas if meta]  # Only add if metadata exists
-
-            # Display the dataframe
-            if data:
-                st.dataframe(data, use_container_width=True)
-            else:
-                st.info("No metadata to display.")
+            # Display documents alongside metadata if available
+            st.write("Sample documents:")
+            for i, (meta, doc) in enumerate(zip(metadatas[:5], documents[:5] if documents else [None] * len(metadatas[:5]))):
+                with st.expander(f"Document {i+1}"):
+                    if doc:
+                        st.text_area("Content", value=doc[:1000] + ("..." if len(doc) > 1000 else ""), height=100)
+                    
+                    st.write("Metadata:")
+                    st.json(meta)
 
         except Exception as e:
             st.error(f"Error previewing collection: {str(e)}")
@@ -624,8 +741,14 @@ class DataProcessor:
                 try:
                     data = collection.get(include=["documents", "metadatas"])
                     metadatas = data["metadatas"]
-                    for metadata in metadatas:
+                    documents = data["documents"]
+                    
+                    # Add documents as chunks if not already in metadata
+                    for i, metadata in enumerate(metadatas):
                         metadata['collection_source'] = collection_name
+                        if 'chunk' not in metadata and i < len(documents):
+                            metadata['chunk'] = documents[i]
+                            
                     all_metadatas.extend(metadatas)
                 except Exception as e:
                     st.error(f"Error loading collection {collection_name}: {str(e)}")
@@ -633,10 +756,13 @@ class DataProcessor:
         if all_metadatas:
             # Get union of all column names
             column_names = list(set().union(*(meta.keys() for meta in all_metadatas)))
-            st.session_state.chunks_df = pd.DataFrame(all_metadatas, columns=column_names)
+            
+            # Create DataFrame with all columns, handling missing values
+            st.session_state.chunks_df = pd.DataFrame(all_metadatas)
+            
+            # Set data source flag and success indicator
             st.session_state.data_saved_success = True
-            st.session_state.source_data = DB
-            st.toast(f"Successfully loaded {len(st.session_state.active_collections)} collections", icon="✅")
+            st.toast(f"Successfully loaded {len(st.session_state.active_collections)} collections with {len(st.session_state.chunks_df)} documents", icon="✅")
         else:          
             st.toast("No data found in the selected collections.", icon="❌")
 
@@ -645,3 +771,39 @@ class DataProcessor:
         st.session_state.active_collections = {}
         st.session_state.chunks_df = pd.DataFrame()
         st.toast("Selection cleared", icon="✅")
+    
+    def search_documents(self, query, columns_to_answer, number_docs_retrieval=3):
+        """
+        Search documents using enhanced vector search with ranking.
+        
+        Args:
+            query (str): Search query
+            columns_to_answer (list): Columns to include in results
+            number_docs_retrieval (int): Number of documents to retrieve
+            
+        Returns:
+            tuple: (results, context text for LLM)
+        """
+        if not st.session_state.embedding_model:
+            return [], "Error: Embedding model not initialized."
+            
+        if not st.session_state.active_collections:
+            return [], "Error: No collections loaded."
+        
+        # Define boost factors for ranking - adjust as needed
+        boost_factors = {
+            "source_file": 0.1,      # Small boost for source file relevance
+            "chunk_length": 0.05     # Small boost for longer chunks
+        }
+        
+        # Perform enhanced vector search
+        results, formatted_results = enhanced_vector_search(
+            st.session_state.embedding_model,
+            query,
+            st.session_state.active_collections,
+            columns_to_answer,
+            number_docs_retrieval,
+            boost_factors
+        )
+        
+        return results, formatted_results

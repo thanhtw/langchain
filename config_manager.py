@@ -9,6 +9,8 @@ import pandas as pd
 import json
 import os
 import re
+import numpy as np
+from typing import List, Dict, Any, Tuple, Optional
 from sentence_transformers import SentenceTransformer
 import chromadb
 from config.constants import (
@@ -19,8 +21,20 @@ from config.constants import (
 )
 from data.data_processor import DataProcessor
 from llms import LangChainLLM, LangChainManager
-from utils.model_downloader import download_model_with_streamlit, get_recommended_model_parameters, RECOMMENDED_MODELS
+from utils.model_downloader import download_model_with_streamlit, RECOMMENDED_MODELS
 from prompts.prompt_engineering import PromptTemplate, PromptLibrary
+# Add quality check widget integrated into chatbot
+from utils.auto_quality_check import render_quality_check_widget_in_chatbot
+
+"""
+Enhanced vector search with relevance ranking.
+
+This module provides improved vector search capabilities with
+result ranking based on semantic similarity and metadata factors.
+"""
+
+
+
 
 class ConfigManager:
     """
@@ -811,8 +825,6 @@ class ConfigManager:
         # Allow user to select columns
         self._render_column_selector()
         
-        # Add quality check widget integrated into chatbot
-        from auto_quality_check import render_quality_check_widget_in_chatbot
         render_quality_check_widget_in_chatbot()
 
         # Initialize chat history if needed

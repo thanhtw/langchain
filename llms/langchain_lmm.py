@@ -10,6 +10,8 @@ import streamlit as st
 import backoff
 import glob
 import subprocess
+import time
+import shutil
 from pathlib import Path
 from dotenv import load_dotenv
 from typing import List, Dict, Any, Optional, Union
@@ -242,7 +244,6 @@ class LangChainLLM(LLM):
                 self._show_notification("Attempted to start Ollama. Please wait a moment...", "info")
                 
             # Wait a moment to give Ollama time to start
-            import time
             time.sleep(3)
             
         except Exception as e:
@@ -416,6 +417,8 @@ class LangChainManager:
         
         # Ensure models directory exists
         os.makedirs(self.models_dir, exist_ok=True)
+        # Create Ollama model directory
+        os.makedirs(os.path.join(self.models_dir, "ollama"), exist_ok=True)
         
     def get_available_providers(self) -> Dict[str, str]:
         """
@@ -441,7 +444,8 @@ class LangChainManager:
         """
         result = {
             "gguf": [],
-            "huggingface": []
+            "huggingface": [],
+            "ollama": []
         }
         
         # Check if models directory exists
@@ -468,6 +472,41 @@ class LangChainManager:
                     "name": model_name,
                     "description": "HuggingFace model"
                 })
+        
+        # Scan for Ollama models in our models directory
+        ollama_models_dir = os.path.join(self.models_dir, "ollama")
+        if os.path.exists(ollama_models_dir):
+            for file in os.listdir(ollama_models_dir):
+                if file.endswith(".bin"):
+                    model_name = file[:-4]  # Remove .bin extension
+                    model_path = os.path.join(ollama_models_dir, file)
+                    result["ollama"].append({
+                        "id": model_name,
+                        "name": model_name,
+                        "description": f"Ollama model ({self._get_size_str(model_path)})"
+                    })
+        
+        # Also check Ollama API for models not in our directory
+        try:
+            import requests
+            base_url = os.getenv("OLLAMA_BASE_URL") or "http://localhost:11434"
+            response = requests.get(f"{base_url}/api/tags")
+            
+            if response.status_code == 200:
+                api_models = response.json().get("models", [])
+                # Add models from API not already in our list
+                for model in api_models:
+                    model_name = model["name"]
+                    # Only add if not already in our list
+                    if not any(m["id"] == model_name for m in result["ollama"]):
+                        result["ollama"].append({
+                            "id": model_name,
+                            "name": model_name,
+                            "description": f"Ollama API model (Size: {model.get('size', 'Unknown')})"
+                        })
+        except Exception as e:
+            # If API call fails, we still have models from directory scan
+            print(f"Error checking Ollama API: {e}")
                 
         return result
     
@@ -498,6 +537,27 @@ class LangChainManager:
             {"id": "stablelm:zephyr", "name": "StableLM Zephyr", "description": "Stability AI's Zephyr model", "pulled": False}
         ]
         
+        # First, check for locally saved Ollama models in ./models/ollama
+        ollama_models_dir = os.path.join(self.models_dir, "ollama")
+        if os.path.exists(ollama_models_dir):
+            for file in os.listdir(ollama_models_dir):
+                if file.endswith(".bin"):
+                    model_name = file[:-4]  # Remove .bin extension
+                    # Mark as pulled if it exists in library_models
+                    for model in library_models:
+                        if model["id"] == model_name:
+                            model["pulled"] = True
+                            break
+                    # Add if not in library_models
+                    if not any(model["id"] == model_name for model in library_models):
+                        library_models.append({
+                            "id": model_name,
+                            "name": model_name,
+                            "description": "Local Ollama model",
+                            "pulled": True
+                        })
+        
+        # Then check Ollama API
         try:
             import requests
             
@@ -511,7 +571,8 @@ class LangChainManager:
                 
                 # Mark models as pulled if they exist locally
                 for model in library_models:
-                    model["pulled"] = model["id"] in pulled_ids
+                    if model["id"] in pulled_ids:
+                        model["pulled"] = True
                 
                 # Add any pulled models that aren't in our standard list
                 for pulled_model in pulled_models:
@@ -523,17 +584,17 @@ class LangChainManager:
                             "description": f"Size: {pulled_model.get('size', 'Unknown')}",
                             "pulled": True
                         })
-                
+            
             return library_models
-                    
+                
         except Exception as e:
             print(f"Error connecting to Ollama: {str(e)}")
-            # Return standard list if connection fails
+            # Return list with local models marked as pulled
             return library_models
             
     def download_ollama_model(self, model_name: str) -> bool:
         """
-        Download a model using Ollama.
+        Download a model using Ollama and save in models directory.
         
         Args:
             model_name (str): Name of the model to download
@@ -543,19 +604,105 @@ class LangChainManager:
         """
         try:
             import requests
+            import time
+            
+            # Create models directory if it doesn't exist
+            os.makedirs(self.models_dir, exist_ok=True)
+            
+            # Create an Ollama subdirectory
+            ollama_models_dir = os.path.join(self.models_dir, "ollama")
+            os.makedirs(ollama_models_dir, exist_ok=True)
             
             # Try to pull the model using Ollama API
             base_url = os.getenv("OLLAMA_BASE_URL") or "http://localhost:11434"
+            
+            # Create progress placeholder
+            progress_placeholder = st.empty()
+            progress_placeholder.info(f"Starting download of {model_name}...")
+            
+            # Start the pull operation
             response = requests.post(
                 f"{base_url}/api/pull",
-                json={"name": model_name}
+                json={"name": model_name, "stream": False}  # Non-streaming for simplicity
             )
             
-            if response.status_code == 200:
-                return True
-            else:
-                st.error(f"Failed to download model: {response.text}")
+            if response.status_code != 200:
+                st.error(f"Failed to start model download: {response.text}")
                 return False
+            
+            # Monitor progress
+            progress_placeholder.info(f"Downloading {model_name}... This may take a while.")
+            
+            # Poll for completion
+            model_ready = False
+            start_time = time.time()
+            while not model_ready and (time.time() - start_time) < 1800:  # 30 minute timeout
+                try:
+                    # Check if model exists in list of models
+                    check_response = requests.get(f"{base_url}/api/tags")
+                    if check_response.status_code == 200:
+                        models = check_response.json().get("models", [])
+                        if any(model["name"] == model_name for model in models):
+                            model_ready = True
+                            progress_placeholder.success(f"Model {model_name} downloaded successfully!")
+                            break
+                    time.sleep(5)  # Check every 5 seconds
+                    
+                    # Update progress message to show we're still working
+                    if (time.time() - start_time) % 15 < 5:  # Change message every 15 seconds
+                        progress_placeholder.info(f"Still downloading {model_name}... Please wait.")
+                except Exception as e:
+                    # Log error but continue polling
+                    print(f"Error checking model status: {str(e)}")
+                    time.sleep(5)
+            
+            if not model_ready:
+                progress_placeholder.error(f"Download timeout for {model_name}. Model may still be downloading.")
+                return False
+            
+            # Model is now available, try to copy it to our models directory
+            try:
+                # Get Ollama's model directory (platform-specific)
+                if platform.system() == "Linux":
+                    ollama_data_dir = os.path.expanduser("~/.ollama/models")
+                elif platform.system() == "Darwin":  # macOS
+                    ollama_data_dir = os.path.expanduser("~/.ollama/models")
+                elif platform.system() == "Windows":
+                    ollama_data_dir = os.path.join(os.getenv("LOCALAPPDATA"), "ollama", "models")
+                else:
+                    progress_placeholder.warning("Unsupported platform for Ollama model copying.")
+                    return True  # Model is still usable via Ollama API
+                
+                # Look for model files
+                if os.path.exists(ollama_data_dir):
+                    # There might be multiple files with this model name
+                    model_files = []
+                    for file in os.listdir(ollama_data_dir):
+                        if file.startswith(model_name.replace(":", "-")) and file.endswith(".bin"):
+                            model_files.append(file)
+                    
+                    # Copy each model file
+                    if model_files:
+                        for file in model_files:
+                            src_file = os.path.join(ollama_data_dir, file)
+                            dest_file = os.path.join(ollama_models_dir, file)
+                            
+                            # Copy with progress update
+                            file_size = os.path.getsize(src_file)
+                            progress_placeholder.info(f"Saving {file} to models directory ({file_size/(1024*1024):.1f} MB)...")
+                            
+                            shutil.copy2(src_file, dest_file)
+                        
+                        progress_placeholder.success(f"Model {model_name} saved to local models directory.")
+                    else:
+                        progress_placeholder.warning(f"Could not find model files for {model_name} to copy.")
+                else:
+                    progress_placeholder.warning(f"Ollama data directory not found at {ollama_data_dir}")
+            except Exception as e:
+                # Don't fail if we can't copy, just log a warning
+                progress_placeholder.warning(f"Could not copy model file to models directory: {str(e)}")
+            
+            return True
                 
         except Exception as e:
             st.error(f"Error downloading model: {str(e)}")

@@ -110,7 +110,6 @@ def run_quality_check_with_analysis(project_id, hw_number, config_path=None, emb
         status_placeholder.error(f"Error generating analysis: {str(e)}")
         return False, f"LLM analysis failed: {str(e)}", None
 
-
 def generate_search_query(json_data):
     """
     Generate a search query based on quality report findings.
@@ -149,7 +148,6 @@ def generate_search_query(json_data):
     else:
         return "java code best practices and common errors"
 
-
 def create_analysis_prompt(analysis_text, retrieved_data, project_id, hw_number):
     """
     Create a comprehensive prompt for LLM analysis.
@@ -182,7 +180,6 @@ Also include a summary of the overall code quality issues and general recommenda
 Be educational and helpful, as if you're teaching a student how to write better code."""
 
     return prompt
-
 
 def vector_search(model, query, active_collections, columns_to_answer, number_docs_retrieval):
     """
@@ -244,7 +241,6 @@ def vector_search(model, query, active_collections, columns_to_answer, number_do
     
     return [filtered_metadatas], search_result
 
-
 def format_search_results(metadatas, columns_to_answer):
     """
     Format search results for display.
@@ -264,7 +260,6 @@ def format_search_results(metadatas, columns_to_answer):
                 search_result += f"   {column.capitalize()}: {metadata.get(column)}\n"
     return search_result
 
-
 def get_build_checkstyle_dir(config_path=None):
     """
     Get the build-checkstyle directory path from config.
@@ -280,8 +275,7 @@ def get_build_checkstyle_dir(config_path=None):
         config_path = "config.yaml"
     
     # Default path as fallback
-    default_path = os.path.abspath(os.path.join(os.getcwd(), '..', '..', 'build-checkstyle'))
-    
+    default_path = os.path.abspath(os.path.join(os.getcwd(), '..', 'build-checkstyle'))
     try:
         # Check if config file exists
         if not os.path.exists(config_path):
@@ -305,7 +299,6 @@ def get_build_checkstyle_dir(config_path=None):
     except Exception as e:
         print(f"Error reading config: {str(e)}")
         return default_path
-
 
 def run_quality_check(project_id, hw_number, config_path=None):
     """
@@ -426,7 +419,6 @@ def run_quality_check(project_id, hw_number, config_path=None):
         if 'original_dir' in locals():
             os.chdir(original_dir)
 
-
 def analyze_quality_report(json_path):
     """
     Analyze a quality report JSON file.
@@ -525,7 +517,6 @@ def analyze_quality_report(json_path):
     except Exception as e:
         return f"Error analyzing quality report: {str(e)}", None
 
-
 # Function to render integrated quality check widget in chatbot section
 def render_quality_check_widget_in_chatbot():
     """
@@ -535,7 +526,7 @@ def render_quality_check_widget_in_chatbot():
         col1, col2 = st.columns(2)
         
         with col1:
-            project_id = st.text_input("Project ID:", value="D0948363")
+            project_id = st.text_input("Student ID:", value="D0948363")
         
         with col2:
             hw_number = st.text_input("Homework Number:", value="HW3")
@@ -563,7 +554,7 @@ def render_quality_check_widget_in_chatbot():
                 success, message, analysis_result = run_quality_check_with_analysis(
                     project_id,
                     hw_number,
-                    config_path="../../build-checkstyle/config.yaml",
+                    config_path="../build-checkstyle/config.yaml",
                     embedding_model=st.session_state.embedding_model,
                     active_collections=st.session_state.active_collections,
                     columns_to_answer=st.session_state.columns_to_answer,
