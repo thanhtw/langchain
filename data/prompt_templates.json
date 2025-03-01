@@ -1,0 +1,27 @@
+{
+  "standard": {
+    "template": "Answer the following question based on the provided context information.\n\nQuestion: {query}\n\nContext:\n{context}\n\nAnswer:",
+    "name": "standard",
+    "description": "Standard RAG prompt with query and context"
+  },
+  "detailed": {
+    "template": "You are a knowledgeable assistant tasked with answering questions based on provided information.\n\nUSER QUERY: {query}\n\nRETRIEVED INFORMATION:\n{context}\n\nINSTRUCTIONS:\n1. Only use information from the provided context\n2. If the context doesn't contain relevant information, acknowledge this limitation\n3. Provide a comprehensive response addressing all aspects of the query\n4. Format your response clearly with sections and bullet points as needed\n\nANSWER:",
+    "name": "detailed",
+    "description": "Detailed prompt with explicit instructions"
+  },
+  "code_analysis": {
+    "template": "You are a professional code reviewer. Analyze the following code snippet in response to the query.\n\nQUERY: {query}\n\nCODE CONTEXT:\n{context}\n\nProvide a detailed analysis including:\n- Code quality assessment\n- Potential bugs or issues\n- Performance considerations\n- Security implications\n- Suggestions for improvement\n\nInclude specific examples from the code in your explanation.",
+    "name": "code_analysis",
+    "description": "Specialized prompt for code analysis"
+  },
+  "llama_optimized": {
+    "template": "<|system|>\nYou are a helpful assistant that provides accurate information based on the context provided.\n</|system|>\n\n<|user|>\nCONTEXT INFORMATION:\n{context}\n\nQUESTION: {query}\n</|user|>\n\n<|assistant|>",
+    "name": "llama_optimized",
+    "description": "Optimized prompt for Llama models"
+  },
+  "function_example": {
+    "template": "Today is {{get_date()}}.\n\nUser query: {query}\n\nRetrieved information:\n{context}\n\nAdditional information from external source: {{fetch_data(topic=query)}}\n\nPlease provide a comprehensive answer taking into account all the information above.",
+    "name": "function_example",
+    "description": "Example template with function calls"
+  }
+}
