@@ -56,6 +56,19 @@ from utils.optimized_chunking import (
     NoChunker
 )
 
+from utils.docker_utils import (
+    check_docker_installed,
+    install_docker,
+    has_nvidia_gpu,
+    has_amd_gpu,
+    install_nvidia_toolkit,
+    check_ollama_running,
+    remove_running_container,
+    run_ollama_container,
+    pull_ollama_model
+
+)
+
 __all__ = [
     # General utilities
     'process_batch',
@@ -100,5 +113,16 @@ __all__ = [
     'BaseChunker', 
     'RecursiveTokenChunker', 
     'SemanticChunker', 
-    'NoChunker'
+    'NoChunker',
+
+    #setup ollama
+    'check_docker_installed',
+    'install_docker',
+    'has_nvidia_gpu',
+    'has_amd_gpu',
+    'install_nvidia_toolkit',
+    'check_ollama_running',
+    'remove_running_container',
+    'run_ollama_container',
+    'pull_ollama_model'
 ]

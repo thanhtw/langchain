@@ -847,3 +847,136 @@ class LangChainManager:
                 params["load_in_8bit"] = True
             
         return params
+    
+    def _initialize_ollama_with_fallback(self, model_path, base_url):
+        """
+        Initialize Ollama with fallback options to handle common errors.
+        
+        Args:
+            model_path (str): Name of the model
+            base_url (str): Ollama API base URL
+            
+        Returns:
+            The initialized Ollama LLM object
+        
+        Raises:
+            Exception: If all fallback attempts fail
+        """
+        import requests
+        import time
+        import platform
+        import os
+        import subprocess
+        from langchain_community.llms import Ollama
+        
+        # Check if model exists
+        try:
+            response = requests.get(f"{base_url}/api/tags")
+            if response.status_code == 200:
+                models = response.json().get("models", [])
+                model_exists = any(model["name"] == model_path for model in models)
+                
+                if not model_exists:
+                    self._show_notification(f"Model {model_path} not found. Attempting to pull...", "info")
+                    pull_response = requests.post(
+                        f"{base_url}/api/pull",
+                        json={"name": model_path, "stream": False}
+                    )
+                    
+                    if pull_response.status_code != 200:
+                        self._show_notification(f"Failed to pull model {model_path}. Status: {pull_response.status_code}", "error")
+                        raise ValueError(f"Failed to pull model {model_path}")
+                    
+                    # Wait for model to be pulled
+                    self._show_notification(f"Pulling model {model_path}. This may take some time...", "info")
+                    pulled = False
+                    for _ in range(30):  # Try for up to 5 minutes
+                        time.sleep(10)
+                        check_response = requests.get(f"{base_url}/api/tags")
+                        if check_response.status_code == 200:
+                            models = check_response.json().get("models", [])
+                            if any(model["name"] == model_path for model in models):
+                                pulled = True
+                                break
+                    
+                    if not pulled:
+                        self._show_notification(f"Timeout waiting for model {model_path} to be pulled", "error")
+                        raise TimeoutError(f"Timeout waiting for model {model_path} to be pulled")
+        except Exception as e:
+            self._show_notification(f"Error checking/pulling model: {str(e)}", "error")
+        
+        # Try multiple initialization approaches
+        errors = []
+        
+        # Approach 1: Standard initialization
+        try:
+            return Ollama(
+                model=model_path,
+                base_url=base_url,
+                temperature=self.optimized_params.get("temperature", 0.7),
+                callback_manager=self.callback_manager
+            )
+        except Exception as e:
+            errors.append(f"Standard init failed: {str(e)}")
+        
+        # Approach 2: Try with different parameters
+        try:
+            return Ollama(
+                model=model_path,
+                base_url=base_url,
+                temperature=self.optimized_params.get("temperature", 0.7),
+                num_gpu=0,  # Force CPU mode
+                num_thread=4  # Limit threads
+            )
+        except Exception as e:
+            errors.append(f"CPU-only init failed: {str(e)}")
+        
+        # Approach 3: Restart Ollama service
+        try:
+            self._show_notification("Attempting to restart Ollama service...", "info")
+            if platform.system() == "Linux":
+                try:
+                    # Try systemctl restart
+                    subprocess.run(
+                        ["systemctl", "--user", "restart", "ollama"],
+                        check=False,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE
+                    )
+                except:
+                    # Try direct restart
+                    try:
+                        subprocess.run(["pkill", "-f", "ollama"], check=False)
+                        time.sleep(2)
+                        subprocess.Popen(
+                            ["ollama", "serve"],
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE
+                        )
+                        time.sleep(5)  # Wait for service to start
+                    except Exception as e:
+                        errors.append(f"Failed to restart Ollama: {str(e)}")
+            
+            # Try initialization again
+            return Ollama(
+                model=model_path,
+                base_url=base_url,
+                temperature=self.optimized_params.get("temperature", 0.7)
+            )
+        except Exception as e:
+            errors.append(f"Init after restart failed: {str(e)}")
+        
+        # If all approaches fail, suggest solutions
+        error_message = "Failed to initialize Ollama model after multiple attempts:\n" + "\n".join(errors)
+        self._show_notification(error_message, "error")
+        self._show_notification(
+            "Please try these solutions:\n"
+            "1. Run the Ubuntu troubleshooter script\n"
+            "2. Manually restart Ollama: `pkill -f ollama && ollama serve`\n"
+            "3. Check logs: `journalctl -u ollama -f`\n"
+            "4. Install missing dependencies: `sudo apt install nvidia-cuda-toolkit libnvidia-compute-*`\n"
+            "5. Try a smaller model like 'phi:mini' or 'gemma:2b'",
+            "info"
+        )
+        
+        raise RuntimeError(error_message)

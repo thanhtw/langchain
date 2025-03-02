@@ -117,16 +117,41 @@ def show_system_info(info):
 def check_ollama_status():
     """Check and start Ollama if needed."""
     from utils.model_downloader import check_ollama_running, start_ollama
+    # Import the Docker utils
+    from utils.docker_utils import check_ollama_running as check_docker_ollama
+    from utils.docker_utils import run_ollama_container
     
     # Check if Ollama is running
-    if not check_ollama_running():
+    ollama_running = check_ollama_running() or check_docker_ollama()
+    
+    if not ollama_running:
         st.sidebar.warning("Ollama is not running.")
-        if st.sidebar.button("Start Ollama"):
-            with st.sidebar.spinner("Starting Ollama..."):
+        
+        # Create columns for selection
+        col1, col2 = st.sidebar.columns(2)
+        
+        with col1:
+            if st.button("Start Local Ollama"):
+                # Use a placeholder in the sidebar instead of spinner
+                status_placeholder = st.sidebar.empty()
+                status_placeholder.info("Starting Ollama locally...")
+                
                 if start_ollama():
-                    st.sidebar.success("Ollama started successfully!")
+                    status_placeholder.success("Ollama started successfully!")
                 else:
-                    st.sidebar.error("Failed to start Ollama. Please start it manually.")
+                    status_placeholder.error("Failed to start Ollama locally.")
+        
+        with col2:
+            if st.button("Start Ollama Container"):
+                # Use a placeholder in the sidebar instead of spinner
+                status_placeholder = st.sidebar.empty()
+                status_placeholder.info("Starting Ollama in Docker...")
+                
+                # Run the Ollama container with sidebar notifications
+                if run_ollama_container(position_noti="sidebar"):
+                    status_placeholder.success("Ollama container started successfully!")
+                else:
+                    status_placeholder.error("Failed to start Ollama container.")
     else:
         st.sidebar.success("Ollama is running.")
 
