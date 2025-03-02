@@ -103,6 +103,7 @@ def enhanced_vector_search(
 ) -> Tuple[List[Dict[str, Any]], str]:
     """
     Perform enhanced vector search with result ranking.
+    Now GPU-aware for faster encoding and similarity calculations.
     
     Args:
         model: The embedding model to use
@@ -132,9 +133,14 @@ def enhanced_vector_search(
         all_metadatas = []
         all_embeddings = []
         
-        # Generate query embeddings
+        # Import GPU utilities
+        from utils.gpu_utils import is_gpu_available, get_device_string
+        gpu_status = f" on {get_device_string()}" if is_gpu_available() else ""
+        
+        # Generate query embeddings - model should already be on GPU if available
         try:
-            query_embedding = model.encode([query])[0]
+            with st.spinner(f"Generating embeddings{gpu_status}..."):
+                query_embedding = model.encode([query])[0]
         except Exception as e:
             st.error(f"Error generating embeddings: {str(e)}")
             return [], ""
@@ -169,12 +175,13 @@ def enhanced_vector_search(
             return [], ""
         
         # Rank the results
-        ranked_results = rank_search_results(
-            all_metadatas, 
-            all_embeddings, 
-            query_embedding,
-            boost_factors
-        )
+        with st.spinner(f"Ranking results{gpu_status}..."):
+            ranked_results = rank_search_results(
+                all_metadatas, 
+                all_embeddings, 
+                query_embedding,
+                boost_factors
+            )
         
         # Limit to requested number after ranking
         ranked_results = ranked_results[:number_docs_retrieval]

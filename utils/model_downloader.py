@@ -258,15 +258,18 @@ def get_model_family(model_path: str) -> str:
 
 def get_recommended_model_parameters(model_path: str, provider: str) -> Dict[str, Any]:
     """
-    Get recommended parameters for a specific model.
+    Get recommended parameters for a specific model with GPU optimization.
     
     Args:
-        model_path (str): Path to the model
+        model_path (str): Path to the model or name of the model
         provider (str): Provider name
         
     Returns:
         dict: Recommended parameters
     """
+    # Import GPU utilities
+    from utils.gpu_utils import is_gpu_available, optimize_model_params
+    
     # Base parameters
     params = {
         "temperature": 0.7,
@@ -281,36 +284,32 @@ def get_recommended_model_parameters(model_path: str, provider: str) -> Dict[str
         if provider in ["llama.cpp", "ctransformers"]:
             params.update({
                 "model_type": "llama",
-                "n_ctx": 4096,
-                "n_gpu_layers": 35
+                "n_ctx": 4096
             })
     elif model_family == "deepseek":
         if provider in ["llama.cpp", "ctransformers"]:
             params.update({
                 "model_type": "deepseek",
-                "n_ctx": 4096,
-                "n_gpu_layers": 35
+                "n_ctx": 4096
             })
     elif model_family == "mistral":
         if provider in ["llama.cpp", "ctransformers"]:
             params.update({
                 "model_type": "mistral",
-                "n_ctx": 4096,
-                "n_gpu_layers": 35
+                "n_ctx": 4096
             })
     elif model_family == "phi":
         if provider in ["llama.cpp", "ctransformers"]:
             params.update({
                 "model_type": "phi",
-                "n_ctx": 2048,
-                "n_gpu_layers": 35
+                "n_ctx": 2048
             })
     elif model_family == "gemma":
         if provider in ["llama.cpp", "ctransformers"]:
             params.update({
                 "model_type": "gemma",
-                "n_ctx": 4096,
-                "n_gpu_layers": 35
+                "n_ctx": 4096
             })
     
-    return params
+    # Optimize parameters based on GPU availability
+    return optimize_model_params(params, provider)

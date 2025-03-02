@@ -3,6 +3,7 @@ Optimized text chunking module for the RAG application.
 
 This module provides various strategies for chunking text documents
 to optimize retrieval and context usage for LLMs.
+GPU-accelerated when available for faster processing.
 """
 from abc import ABC, abstractmethod
 from typing import List, Dict, Any, Optional
@@ -176,9 +177,23 @@ class SemanticChunker(BaseChunker):
         self.model = None  # Lazy-load the model when needed
         
     def _get_model(self):
-        """Lazy-load the embedding model."""
+        """Lazy-load the embedding model with GPU support when available."""
         if self.model is None:
-            self.model = SentenceTransformer(self.model_name)
+            # Import GPU utilities
+            from utils.gpu_utils import torch_device
+            device = torch_device()
+            
+            try:
+                # Initialize model on appropriate device
+                self.model = SentenceTransformer(self.model_name, device=device)
+                
+                # Log device being used
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.info(f"Initialized SentenceTransformer model on {device}")
+            except Exception as e:
+                # Fall back to CPU if there's an issue
+                self.model = SentenceTransformer(self.model_name)
         return self.model
         
     def split_text(self, text: str) -> List[str]:
@@ -203,7 +218,15 @@ class SemanticChunker(BaseChunker):
             
         # Get embeddings for semantic comparison
         model = self._get_model()
-        embeddings = model.encode(sentences)
+        
+        # Use batched encoding for efficiency on GPU
+        batch_size = 32  # Adjust based on memory constraints
+        embeddings = []
+        
+        for i in range(0, len(sentences), batch_size):
+            batch = sentences[i:i+batch_size]
+            batch_embeddings = model.encode(batch)
+            embeddings.extend(batch_embeddings)
         
         # Group sentences into chunks based on similarity
         chunks = []

@@ -90,6 +90,7 @@ class ConfigManager:
             self._render_settings()
             self._render_configuration_summary()
             
+    # 1. In the _render_language_settings method:
     def _render_language_settings(self):
         """Render language selection in sidebar."""
         st.header("1. Setup Language")
@@ -99,21 +100,27 @@ class ConfigManager:
             index=0
         )
         
+        # Import GPU utilities for model initialization
+        from utils.gpu_utils import torch_device, get_device_string
+        device = torch_device()
+        
         # Handle language selection
         if language_choice == ENGLISH:
             if st.session_state.get("language") != EN:
                 st.session_state.language = EN
                 if st.session_state.get("embedding_model_name") != 'all-MiniLM-L6-v2':
-                    st.session_state.embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
+                    # Use the device for SentenceTransformer
+                    st.session_state.embedding_model = SentenceTransformer('all-MiniLM-L6-v2', device=device)
                     st.session_state.embedding_model_name = 'all-MiniLM-L6-v2'
-                st.success("Using English embedding model: all-MiniLM-L6-v2")
+                    st.success(f"Using English embedding model: all-MiniLM-L6-v2 on {get_device_string()}")
         elif language_choice == VIETNAMESE:
             if st.session_state.get("language") != VI:
                 st.session_state.language = VI
                 if st.session_state.get("embedding_model_name") != 'keepitreal/vietnamese-sbert':
-                    st.session_state.embedding_model = SentenceTransformer('keepitreal/vietnamese-sbert')
+                    # Use the device for SentenceTransformer
+                    st.session_state.embedding_model = SentenceTransformer('keepitreal/vietnamese-sbert', device=device)
                     st.session_state.embedding_model_name = 'keepitreal/vietnamese-sbert'
-                st.success("Using Vietnamese embedding model: keepitreal/vietnamese-sbert")
+                    st.success(f"Using Vietnamese embedding model: keepitreal/vietnamese-sbert on {get_device_string()}")
 
     def _render_settings(self):
         """Render settings section in sidebar."""
@@ -292,9 +299,11 @@ class ConfigManager:
                         else:
                             st.error(f"Failed to initialize {selected_model['name']}.")
             
+    # 3. In the _render_gguf_setup method:
     def _render_gguf_setup(self, provider):
         """
         Render GGUF model setup for llama.cpp or ctransformers.
+        GPU detection and optimization is now centralized.
         
         Args:
             provider (str): Provider name
@@ -302,170 +311,105 @@ class ConfigManager:
         st.write(f"### {provider.capitalize()} with GGUF Models")
         st.write("GGUF models provide excellent performance on consumer hardware.")
         
-        # Tabs for GGUF options
-        download_tab, existing_tab = st.tabs(["Download New Model", "Use Existing Model"])
+        # Check for GPU using our utility
+        from utils.gpu_utils import get_gpu_info, is_gpu_available
+        gpu_available = is_gpu_available()
+        gpu_info = get_gpu_info()
         
-        with download_tab:
-            st.write("#### Download Pre-quantized Models")
+        if gpu_available:
+            st.success(f"GPU acceleration will be enabled ({gpu_info['name']})")
+        
+        # Rest of the method...
+        
+        # When configuring GPU layers:
+        n_ctx = st.number_input(
+            "Context Length:",
+            min_value=512,
+            max_value=8192,
+            value=4096,
+            step=512,
+            help="Maximum context length. Higher values use more memory."
+        )
+        
+        # GPU layers - automatically set if GPU is available
+        if gpu_available:
+            max_gpu_layers_default = 35  # Good default value for most GPUs
+            gpu_memory = gpu_info.get("memory_gb", 0)
             
-            # Show available models to download
-            model_options = []
-            for model_name, info in RECOMMENDED_MODELS.items():
-                if provider == "llama.cpp" or (provider == "ctransformers" and info["family"] in ["llama", "deepseek"]):
-                    model_options.append({
-                        "name": model_name,
-                        "description": info["description"]
-                    })
-            
-            if not model_options:
-                st.warning(f"No recommended models available for {provider}.")
-                return
+            # Adjust based on GPU memory
+            if gpu_memory < 4:
+                max_gpu_layers_default = 20
+            elif gpu_memory > 16:
+                max_gpu_layers_default = 50
                 
-            selected_download = st.selectbox(
-                "Select Model to Download:",
-                [f"{option['name']} - {option['description']}" for option in model_options],
-                format_func=lambda x: x
+            max_gpu_layers = st.number_input(
+                "GPU Layers:",
+                min_value=0,
+                max_value=100,
+                value=max_gpu_layers_default,
+                step=5,
+                help="Higher values use more GPU memory but provide better performance."
             )
-            
-            if selected_download:
-                model_name = selected_download.split(" - ")[0]
+        else:
+            max_gpu_layers = 0
+            st.info("No GPU detected - GPU layers set to 0 (CPU-only mode)")
+        
+        # Store parameters
+        params = {
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "n_ctx": n_ctx,
+            "n_gpu_layers": max_gpu_layers
+        }
+        
+        if model_type_value:
+            params["model_type"] = model_type_value
+        
+        st.session_state.model_params = params
+        
+        # Initialize button            
+        if st.button("Initialize Selected Model"):
+            with st.spinner(f"Initializing {selected_model_name}..."):
+                # Import the optimize_model_params function to ensure proper GPU utilization
+                from utils.gpu_utils import optimize_model_params, get_device_string
                 
-                if st.button(f"Download {model_name}"):
-                    model_info = {model_name: RECOMMENDED_MODELS[model_name]}
-                    model_path = download_model_with_streamlit(model_info, self.models_dir)
-                    
-                    if model_path:
-                        st.success(f"Successfully downloaded to {model_path}")
-                        st.session_state.downloaded_model = model_path
-                    else:
-                        st.error("Failed to download model.")
-            
-        with existing_tab:
-            st.write("#### Use Existing GGUF Model")
-            
-            # Scan for GGUF models in models directory
-            local_models = self.langchain_manager.scan_for_local_models()
-            gguf_models = local_models["gguf"]
-            
-            if not gguf_models:
-                st.warning("No GGUF models found. Please download a model first.")
-                return
+                # Optimize parameters for GPU when available
+                optimized_params = optimize_model_params(
+                    st.session_state.model_params, 
+                    provider
+                )
                 
-            model_paths = {os.path.basename(model["id"]): model["id"] for model in gguf_models}
-            
-            selected_model_name = st.selectbox(
-                "Select Local Model:",
-                list(model_paths.keys())
-            )
-            
-            if selected_model_name:
-                model_path = model_paths[selected_model_name]
+                llm = self.langchain_manager.initialize_llm(
+                    model_path, 
+                    provider, 
+                    optimized_params
+                )
                 
-                # Model type selection for CTransformers
-                if provider == "ctransformers":
-                    model_type = st.selectbox(
-                        "Model Type:",
-                        list(MODEL_TYPES.keys()),
-                        format_func=lambda x: f"{x} ({MODEL_TYPES[x]})"
-                    )
-                    model_type_value = MODEL_TYPES[model_type]
+                if llm:
+                    st.session_state.llm_name = model_path
+                    st.session_state.llm_provider = provider
+                    st.session_state.llm_type = LANGCHAIN_LLM
+                    st.session_state.llm_model = llm
+                    st.success(f"Successfully initialized {selected_model_name} on {get_device_string()}!")
                 else:
-                    model_type_value = None
-                
-                # Temperature slider
-                temperature = st.slider(
-                    "Temperature:",
-                    min_value=0.0,
-                    max_value=1.0,
-                    value=0.7,
-                    step=0.1,
-                    help="Higher values make output more random, lower values more deterministic."
-                )
-                
-                # Max tokens slider
-                max_tokens = st.slider(
-                    "Max Tokens:",
-                    min_value=64,
-                    max_value=4096,
-                    value=512,
-                    step=64,
-                    help="Maximum number of tokens to generate."
-                )
-                
-                # Context length (n_ctx)
-                n_ctx = st.number_input(
-                    "Context Length:",
-                    min_value=512,
-                    max_value=8192,
-                    value=4096,
-                    step=512,
-                    help="Maximum context length. Higher values use more memory."
-                )
-                
-                # GPU layers
-                try:
-                    import torch
-                    gpu_available = torch.cuda.is_available()
-                    max_gpu_layers_default = 35 if gpu_available else 0
-                    max_gpu_layers = st.number_input(
-                        "GPU Layers:",
-                        min_value=0,
-                        max_value=100,
-                        value=max_gpu_layers_default,
-                        step=5,
-                        help="Number of layers to offload to GPU. Set to 0 for CPU-only. Set to higher values for better GPU utilization."
-                    )
-                except ImportError:
-                    gpu_available = False
-                    max_gpu_layers = 0
-                
-                # Store parameters
-                params = {
-                    "temperature": temperature,
-                    "max_tokens": max_tokens,
-                    "n_ctx": n_ctx,
-                    "n_gpu_layers": max_gpu_layers
-                }
-                
-                if model_type_value:
-                    params["model_type"] = model_type_value
-                
-                st.session_state.model_params = params
-                
-                # Initialize button            
-                if st.button("Initialize Selected Model"):
-                    with st.spinner(f"Initializing {selected_model_name}..."):
-                        llm = self.langchain_manager.initialize_llm(
-                            model_path, 
-                            provider, 
-                            st.session_state.model_params
-                        )
-                        
-                        if llm:
-                            st.session_state.llm_name = model_path
-                            st.session_state.llm_provider = provider
-                            st.session_state.llm_type = LANGCHAIN_LLM
-                            st.session_state.llm_model = llm
-                            st.success(f"Successfully initialized {selected_model_name}!")
-                        else:
-                            st.error(f"Failed to initialize {selected_model_name}.")
-            
+                    st.error(f"Failed to initialize {selected_model_name}.")
+
+    # 2. In the _render_transformers_setup method:
     def _render_transformers_setup(self):
         """Render setup for HuggingFace Transformers models."""
         st.write("### HuggingFace Transformers")
         st.write("Load models directly from HuggingFace or from local files.")
         
-        # Check for GPU
-        try:
-            import torch
-            gpu_available = torch.cuda.is_available()
-            if gpu_available:
-                st.success(f"GPU detected: {torch.cuda.get_device_name(0)}")
-            else:
-                st.warning("No GPU detected. Model loading and inference will be slower.")
-        except ImportError:
-            gpu_available = False
-            st.warning("PyTorch not found. Please install torch for GPU support.")
+        # Check for GPU using our utility
+        from utils.gpu_utils import get_gpu_info, is_gpu_available
+        gpu_info = get_gpu_info()
+        gpu_available = gpu_info["available"]
+        
+        if gpu_available:
+            st.success(f"GPU detected: {gpu_info['name']} with {gpu_info['memory_gb']:.1f} GB memory")
+            st.info("GPU acceleration will be automatically enabled for all models")
+        else:
+            st.warning("No GPU detected. Model loading and inference will be slower.")
         
         # Tabs for HuggingFace options
         hub_tab, local_tab = st.tabs(["HuggingFace Hub", "Local Models"])
@@ -502,10 +446,17 @@ class ConfigManager:
             if model_id:
                 # Quantization options
                 if gpu_available:
+                    gpu_memory = gpu_info.get("memory_gb", 0)
+                    default_quantization = 1  # 8-bit by default when GPU available
+                    
+                    if gpu_memory < 8:
+                        default_quantization = 2  # 4-bit for limited memory
+                        st.info("Limited GPU memory detected. 4-bit quantization recommended.")
+                    
                     quantization = st.selectbox(
                         "Quantization:",
                         ["None", "8-bit", "4-bit"],
-                        index=1 if gpu_available else 0,
+                        index=default_quantization,
                         help="Quantization reduces memory usage but may slightly impact quality."
                     )
                     
@@ -514,6 +465,7 @@ class ConfigManager:
                 else:
                     load_in_8bit = False
                     load_in_4bit = False
+                    st.info("No GPU detected - quantization disabled")
                 
                 # Temperature slider
                 temperature = st.slider(
@@ -540,16 +492,26 @@ class ConfigManager:
                     "temperature": temperature,
                     "max_tokens": max_tokens,
                     "load_in_8bit": load_in_8bit,
-                    "load_in_4bit": load_in_4bit
+                    "load_in_4bit": load_in_4bit,
+                    "device_map": "auto" if gpu_available else None
                 }
                 
                 # Initialize button            
                 if st.button("Initialize Selected Model"):
                     with st.spinner(f"Initializing {model_id}..."):
+                        # Import the optimize_model_params function to ensure proper GPU utilization
+                        from utils.gpu_utils import optimize_model_params
+                        
+                        # Optimize parameters for GPU when available
+                        optimized_params = optimize_model_params(
+                            st.session_state.model_params, 
+                            "transformers"
+                        )
+                        
                         llm = self.langchain_manager.initialize_llm(
                             model_id, 
                             "transformers", 
-                            st.session_state.model_params
+                            optimized_params
                         )
                         
                         if llm:
@@ -557,99 +519,9 @@ class ConfigManager:
                             st.session_state.llm_provider = "transformers"
                             st.session_state.llm_type = LANGCHAIN_LLM
                             st.session_state.llm_model = llm
-                            st.success(f"Successfully initialized {model_id}!")
+                            st.success(f"Successfully initialized {model_id} on {get_device_string()}!")
                         else:
                             st.error(f"Failed to initialize {model_id}.")
-            
-        with local_tab:
-            st.write("#### Use Local HuggingFace Model")
-            
-            # Scan for local HuggingFace models
-            local_models = self.langchain_manager.scan_for_local_models()
-            hf_models = local_models["huggingface"]
-            
-            if not hf_models:
-                st.warning("No local HuggingFace models found.")
-                st.info("You need to download models from HuggingFace Hub first.")
-                st.code("from transformers import AutoModelForCausalLM, AutoTokenizer\n\n"
-                       "model_id = 'meta-llama/Meta-Llama-3-8B'\n"
-                       "model = AutoModelForCausalLM.from_pretrained(model_id, token='YOUR_HF_TOKEN')\n"
-                       "tokenizer = AutoTokenizer.from_pretrained(model_id, token='YOUR_HF_TOKEN')\n\n"
-                       "# Save locally\n"
-                       "model.save_pretrained('./models/llama-3-8b')\n"
-                       "tokenizer.save_pretrained('./models/llama-3-8b')")
-                return
-                
-            model_paths = {os.path.basename(model["id"]): model["id"] for model in hf_models}
-            
-            selected_model_name = st.selectbox(
-                "Select Local Model:",
-                list(model_paths.keys())
-            )
-            
-            if selected_model_name:
-                model_path = model_paths[selected_model_name]
-                
-                # Same options as HuggingFace Hub tab
-                if gpu_available:
-                    quantization = st.selectbox(
-                        "Quantization:",
-                        ["None", "8-bit", "4-bit"],
-                        index=1 if gpu_available else 0,
-                        help="Quantization reduces memory usage but may slightly impact quality."
-                    )
-                    
-                    load_in_8bit = quantization == "8-bit"
-                    load_in_4bit = quantization == "4-bit"
-                else:
-                    load_in_8bit = False
-                    load_in_4bit = False
-                
-                # Temperature slider
-                temperature = st.slider(
-                    "Temperature:",
-                    min_value=0.0,
-                    max_value=1.0,
-                    value=0.7,
-                    step=0.1,
-                    help="Higher values make output more random, lower values more deterministic."
-                )
-                
-                # Max tokens slider
-                max_tokens = st.slider(
-                    "Max Tokens:",
-                    min_value=64,
-                    max_value=4096,
-                    value=512,
-                    step=64,
-                    help="Maximum number of tokens to generate."
-                )
-                
-                # Store parameters
-                st.session_state.model_params = {
-                    "temperature": temperature,
-                    "max_tokens": max_tokens,
-                    "load_in_8bit": load_in_8bit,
-                    "load_in_4bit": load_in_4bit
-                }
-                
-                # Initialize button            
-                if st.button("Initialize Selected Model"):
-                    with st.spinner(f"Initializing {selected_model_name}..."):
-                        llm = self.langchain_manager.initialize_llm(
-                            model_path, 
-                            "transformers", 
-                            st.session_state.model_params
-                        )
-                        
-                        if llm:
-                            st.session_state.llm_name = model_path
-                            st.session_state.llm_provider = "transformers"
-                            st.session_state.llm_type = LANGCHAIN_LLM
-                            st.session_state.llm_model = llm
-                            st.success(f"Successfully initialized {selected_model_name}!")
-                        else:
-                            st.error(f"Failed to initialize {selected_model_name}.")
                             
     def _render_export_section(self, section_num):
         """

@@ -12,9 +12,12 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sentence_transformers import SentenceTransformer
 
 
+# Updates to chunking/semantic_chunker.py
+
 class ProtonxSemanticChunker(BaseChunker):
     """
     Chunker that groups text by semantic similarity.
+    Now optimized to use GPU when available.
     
     Uses either TF-IDF or transformer embeddings to measure
     semantic similarity between sentences.
@@ -31,14 +34,31 @@ class ProtonxSemanticChunker(BaseChunker):
         """
         self.threshold = threshold
         self.embedding_type = embedding_type
-        self.model = model
+        self.model_name = model
+        self.model = None  # Will be initialized when needed
 
         # Download punkt for sentence tokenization, ensuring it's only done when class is initialized
         nltk.download("punkt", quiet=True)
     
+    def _initialize_model(self):
+        """Initialize the model with GPU support if available."""
+        if self.embedding_type == "transformers" and self.model is None:
+            try:
+                # Import GPU utilities
+                from utils.gpu_utils import torch_device
+                device = torch_device()
+                
+                # Initialize model on appropriate device
+                self.model = SentenceTransformer(self.model_name, device=device)
+            except Exception as e:
+                print(f"Warning: Could not initialize model on GPU: {e}")
+                # Fall back to CPU if there's an issue
+                self.model = SentenceTransformer(self.model_name)
+    
     def embed_function(self, sentences):
         """
         Embeds sentences using the specified embedding method.
+        Now GPU-aware for better performance.
         
         Args:
             sentences (List[str]): List of sentences to embed
@@ -53,7 +73,8 @@ class ProtonxSemanticChunker(BaseChunker):
             vectorizer = TfidfVectorizer().fit_transform(sentences)
             return vectorizer.toarray()
         elif self.embedding_type == "transformers":
-            self.model = SentenceTransformer(self.model)
+            # Initialize model if not done yet
+            self._initialize_model()
             return self.model.encode(sentences)
         else:
             raise ValueError("Unsupported embedding type. Choose 'tfidf' or 'transformers'.")

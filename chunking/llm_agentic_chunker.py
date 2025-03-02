@@ -3,14 +3,18 @@ LLM-based agentic chunking implementation.
 
 This module provides text chunking that uses LLMs to intelligently determine
 chunk boundaries based on content understanding.
+GPU-accelerated when available for faster processing.
 """
 
 import re
+import logging
 from tqdm import tqdm
 from chunking.base_chunker import BaseChunker
 from chunking.recursive_token_chunker import RecursiveTokenChunker
 from llms.base import LLM
 
+# Configure logger
+logger = logging.getLogger(__name__)
 
 class LLMAgenticChunkerv2(BaseChunker):
     """
@@ -35,6 +39,12 @@ class LLMAgenticChunkerv2(BaseChunker):
             chunk_overlap=0,
             length_function=len  # Simple length function
         )
+        
+        # Check if GPU is being used by the LLM
+        from utils.gpu_utils import is_gpu_available
+        self.gpu_available = is_gpu_available()
+        if self.gpu_available:
+            logger.info("GPU acceleration available for LLM-based chunking")
     
     def get_prompt(self, chunked_input, current_chunk=0, invalid_response=None):
         """
@@ -85,7 +95,8 @@ class LLMAgenticChunkerv2(BaseChunker):
         current_chunk = 0
 
         # Process the chunks with the LLM to find semantic boundaries
-        with tqdm(total=len(chunks), desc="Processing chunks") as pbar:
+        device_info = " on GPU" if self.gpu_available else " on CPU"
+        with tqdm(total=len(chunks), desc=f"Processing chunks{device_info}") as pbar:
             while current_chunk < len(chunks) - 4:  # Stop when we're close to the end
                 token_count = 0
                 chunked_input = ''
@@ -102,16 +113,20 @@ class LLMAgenticChunkerv2(BaseChunker):
                 messages = self.get_prompt(chunked_input, current_chunk)
                 
                 # Get LLM response and parse it
-                while True:
-                    result_string = self.client.create_agentic_chunker_message(
-                        messages[0]['content'], 
-                        messages[1:], 
-                        max_tokens=200, 
-                        temperature=0.2
-                    )
-                    
-                    # Extract the split indices from the response
+                max_retries = 3
+                retry_count = 0
+                
+                while retry_count < max_retries:
                     try:
+                        # Set a lower temperature for more deterministic results - better for chunking decisions
+                        result_string = self.client.create_agentic_chunker_message(
+                            messages[0]['content'], 
+                            messages[1:], 
+                            max_tokens=200, 
+                            temperature=0.2
+                        )
+                        
+                        # Extract the split indices from the response
                         split_after_line = [line for line in result_string.split('\n') if 'split_after:' in line][0]
                         numbers = re.findall(r'\d+', split_after_line)
                         numbers = list(map(int, numbers))
@@ -120,12 +135,20 @@ class LLMAgenticChunkerv2(BaseChunker):
                         if numbers == sorted(numbers) and all(number >= current_chunk for number in numbers):
                             break
                         else:
+                            retry_count += 1
                             messages = self.get_prompt(chunked_input, current_chunk, numbers)
-                    except (IndexError, ValueError):
+                    except (IndexError, ValueError) as e:
                         # Handle parsing errors by regenerating response
+                        retry_count += 1
+                        logger.warning(f"Error parsing LLM response: {str(e)}. Retry {retry_count}/{max_retries}")
                         messages = self.get_prompt(chunked_input, current_chunk, "invalid format")
                         continue
-
+                
+                if retry_count == max_retries:
+                    # After max retries, use fallback approach
+                    logger.warning("Max retries reached, using fallback chunking method")
+                    numbers = [current_chunk + 4]  # Simple fallback: advance by 4 chunks
+                
                 # Add valid split indices
                 split_indices.extend(numbers)
                 

@@ -2,7 +2,7 @@
 Main application entry point for the RAG-based tool.
 
 This script initializes the Streamlit application with local model support,
-optimized for running on both Linux and Windows platforms.
+optimized for running on both Linux and Windows platforms with GPU acceleration when available.
 """
 
 import streamlit as st
@@ -12,8 +12,6 @@ import platform
 from pathlib import Path
 from dotenv import load_dotenv
 from config_manager import ConfigManager
-from utils.model_downloader import check_ollama_running, start_ollama
-
 
 # Add the current directory to the Python path
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -41,10 +39,14 @@ def ensure_directories():
 def check_system_compatibility():
     """
     Check system compatibility and show relevant information.
+    GPU detection is now centralized using PyTorch.
     
     Returns:
         dict: System information
     """
+    # Import GPU utilities
+    from utils.gpu_utils import is_gpu_available, get_gpu_info
+    
     info = {
         "platform": platform.system(),
         "cpu_count": os.cpu_count(),
@@ -53,15 +55,12 @@ def check_system_compatibility():
         "ram_gb": None
     }
     
-    # Check for GPU
-    try:
-        import torch
-        info["gpu_available"] = torch.cuda.is_available()
-        if info["gpu_available"]:
-            info["gpu_name"] = torch.cuda.get_device_name(0)
-            info["gpu_memory"] = torch.cuda.get_device_properties(0).total_memory / (1024**3)  # Convert to GB
-    except ImportError:
-        pass
+    # Check for GPU using our centralized utility
+    gpu_info = get_gpu_info()
+    info["gpu_available"] = gpu_info["available"]
+    if info["gpu_available"]:
+        info["gpu_name"] = gpu_info["name"]
+        info["gpu_memory"] = gpu_info["memory_gb"]
     
     # Check RAM
     try:
@@ -93,9 +92,9 @@ def show_system_info(info):
     if info["gpu_available"]:
         st.sidebar.text(f"GPU: {info['gpu_name']}")
         st.sidebar.text(f"GPU Memory: {info['gpu_memory']:.1f} GB")
-        st.sidebar.text("✅ GPU acceleration available")
+        st.sidebar.text("✅ GPU acceleration available and enabled")
     else:
-        st.sidebar.text("❌ No GPU detected")
+        st.sidebar.text("❌ No GPU detected - using CPU mode")
     
     # Recommendations based on system
     st.sidebar.subheader("Recommendations")
@@ -106,12 +105,19 @@ def show_system_info(info):
         st.sidebar.info("Medium RAM detected. Use quantized models (Q4) for best performance.")
     
     if info["gpu_available"]:
-        st.sidebar.success("GPU detected. Enable GPU acceleration in model settings.")
+        if info["gpu_memory"] < 4:
+            st.sidebar.warning("Limited GPU memory. Using 4-bit quantization for better efficiency.")
+        elif info["gpu_memory"] < 8:
+            st.sidebar.info("Medium GPU memory. Using 8-bit quantization for better efficiency.")
+        else:
+            st.sidebar.success("Good GPU memory available. Maximizing GPU usage.")
     else:
         st.sidebar.info("No GPU detected. CPU-only mode will be slower.")
 
 def check_ollama_status():
     """Check and start Ollama if needed."""
+    from utils.model_downloader import check_ollama_running, start_ollama
+    
     # Check if Ollama is running
     if not check_ollama_running():
         st.sidebar.warning("Ollama is not running.")

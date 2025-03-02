@@ -52,11 +52,18 @@ class LangChainLLM(LLM):
         self.model_params = model_params or {}
         self.position_noti = position_noti
         self.callback_manager = CallbackManager([StreamingStdOutCallbackHandler()])
+        
+        # Apply GPU optimizations before initializing
+        from utils.gpu_utils import optimize_model_params, is_gpu_available
+        self.gpu_available = is_gpu_available()
+        self.optimized_params = optimize_model_params(self.model_params, self.provider)
+        
+        # Initialize the LLM with optimized parameters
         self.llm = self._initialize_llm()
         
     def _initialize_llm(self) -> Any:
         """
-        Initialize the appropriate LLM based on provider.
+        Initialize the appropriate LLM based on provider with GPU optimization.
         
         Returns:
             The initialized LLM object
@@ -65,17 +72,21 @@ class LangChainLLM(LLM):
             Exception: If initialization fails
         """
         try:
-            # Common parameters
-            temperature = self.model_params.get("temperature", 0.7)
-            max_tokens = self.model_params.get("max_tokens", 512)
+            # Use optimized parameters
+            temperature = self.optimized_params.get("temperature", 0.7)
+            max_tokens = self.optimized_params.get("max_tokens", 512)
             
-            # Initialize LLM based on provider
+            # Initialize LLM based on provider with GPU awareness
             if self.provider == "ollama":
                 self._show_notification(f"Initializing Ollama model: {self.model_path}", "info")
                 base_url = os.getenv("OLLAMA_BASE_URL") or "http://localhost:11434"
                 
                 # Check if Ollama is running
                 self._check_ollama_running(base_url)
+                
+                # Ollama handles GPU internally
+                if self.gpu_available:
+                    self._show_notification("GPU detected - Ollama will use GPU automatically", "info")
                 
                 return Ollama(
                     model=self.model_path,
@@ -92,9 +103,12 @@ class LangChainLLM(LLM):
                     self._show_notification(f"Model file not found: {self.model_path}", "error")
                     raise FileNotFoundError(f"Model file not found: {self.model_path}")
                 
-                # Get model specific parameters
-                n_ctx = self.model_params.get("n_ctx", 2048)
-                n_gpu_layers = self.model_params.get("n_gpu_layers", 0)
+                # Get model specific parameters from optimized params
+                n_ctx = self.optimized_params.get("n_ctx", 2048)
+                n_gpu_layers = self.optimized_params.get("n_gpu_layers", 0)
+                
+                if self.gpu_available and n_gpu_layers > 0:
+                    self._show_notification(f"GPU acceleration enabled with {n_gpu_layers} layers", "success")
                 
                 return LlamaCpp(
                     model_path=self.model_path,
@@ -113,26 +127,29 @@ class LangChainLLM(LLM):
                     from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline
                     import torch
                     
-                    # Check for GPU availability
-                    device = "cuda" if torch.cuda.is_available() else "cpu"
+                    # Get device information
+                    device = "cuda" if self.gpu_available else "cpu"
                     self._show_notification(f"Using device: {device}", "info")
                     
-                    # Get model parameters
-                    load_in_8bit = self.model_params.get("load_in_8bit", False)
-                    load_in_4bit = self.model_params.get("load_in_4bit", False)
+                    # Get model parameters from optimized params
+                    load_in_8bit = self.optimized_params.get("load_in_8bit", False)
+                    load_in_4bit = self.optimized_params.get("load_in_4bit", False)
+                    device_map = self.optimized_params.get("device_map", "auto" if device == "cuda" else None)
                     
                     # Load tokenizer and model
                     tokenizer = AutoTokenizer.from_pretrained(self.model_path)
                     
                     # Prepare model loading kwargs
                     model_kwargs = {
-                        "device_map": "auto" if device == "cuda" else None,
+                        "device_map": device_map,
                     }
                     
                     if load_in_8bit and device == "cuda":
                         model_kwargs["load_in_8bit"] = True
+                        self._show_notification("Using 8-bit quantization for better GPU memory usage", "info")
                     elif load_in_4bit and device == "cuda":
                         model_kwargs["load_in_4bit"] = True
+                        self._show_notification("Using 4-bit quantization for better GPU memory usage", "info")
                         
                     model = AutoModelForCausalLM.from_pretrained(
                         self.model_path,
@@ -146,8 +163,8 @@ class LangChainLLM(LLM):
                         tokenizer=tokenizer,
                         max_new_tokens=max_tokens,
                         temperature=temperature,
-                        top_p=self.model_params.get("top_p", 0.95),
-                        top_k=self.model_params.get("top_k", 50),
+                        top_p=self.optimized_params.get("top_p", 0.95),
+                        top_k=self.optimized_params.get("top_k", 50),
                         device=0 if device == "cuda" else -1
                     )
                     
@@ -168,13 +185,18 @@ class LangChainLLM(LLM):
                     self._show_notification(f"Model file not found: {self.model_path}", "error")
                     raise FileNotFoundError(f"Model file not found: {self.model_path}")
                 
-                # Get configuration
-                model_type = self.model_params.get("model_type", "llama")
+                # Get configuration from optimized params
+                model_type = self.optimized_params.get("model_type", "llama")
+                gpu_layers = self.optimized_params.get("gpu_layers", 0)
+                
+                if self.gpu_available and gpu_layers > 0:
+                    self._show_notification(f"GPU acceleration enabled with {gpu_layers} layers", "success")
+                
                 config = {
                     "max_new_tokens": max_tokens,
                     "temperature": temperature,
-                    "context_length": self.model_params.get("context_length", 2048),
-                    "gpu_layers": self.model_params.get("gpu_layers", 0)
+                    "context_length": self.optimized_params.get("context_length", 2048),
+                    "gpu_layers": gpu_layers
                 }
                 
                 return CTransformers(

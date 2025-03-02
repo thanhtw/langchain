@@ -17,3 +17,7 @@ openpyxl==3.1.2
 requests==2.31.0
 langchain-core==0.1.19
 torch==2.1.2
+# GPU-specific dependencies
+accelerate>=0.20.3
+bitsandbytes>=0.41.0
+transformers>=4.36.0

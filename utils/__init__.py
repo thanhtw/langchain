@@ -19,6 +19,16 @@ from utils.model_downloader import (
     RECOMMENDED_MODELS
 )
 
+# GPU utilities
+from utils.gpu_utils import (
+    is_gpu_available,
+    get_gpu_info,
+    optimize_model_params,
+    get_optimal_batch_size,
+    torch_device,
+    get_device_string
+)
+
 from utils.auto_quality_check import (
     run_quality_check_with_analysis, 
     generate_search_query,
@@ -60,8 +70,16 @@ __all__ = [
     'get_model_family',
     'get_recommended_model_parameters',
     'RECOMMENDED_MODELS',
+    
+    # GPU utilities
+    'is_gpu_available',
+    'get_gpu_info',
+    'optimize_model_params',
+    'get_optimal_batch_size',
+    'torch_device',
+    'get_device_string',
 
-    #auto quality check
+    # Auto quality check
     'run_quality_check_with_analysis', 
     'generate_search_query',
     'vector_search',
@@ -71,17 +89,16 @@ __all__ = [
     'analyze_quality_report',
     'render_quality_check_widget_in_chatbot',
 
-    #enhance vector
+    # Enhanced vector search
     'compute_similarity',
     'rank_search_results',
     'enhanced_vector_search',
     'format_search_results',
 
-    #chunking
+    # Chunking 
     'get_chunker', 
     'BaseChunker', 
     'RecursiveTokenChunker', 
     'SemanticChunker', 
     'NoChunker'
-     
 ]

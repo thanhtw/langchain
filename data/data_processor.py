@@ -277,11 +277,18 @@ class DataProcessor:
     def _save_data_in_batches(self, collection):
         """
         Process dataframe batches with progress bar.
+        Optimized for GPU usage with dynamic batch sizing.
         
         Args:
             collection: Chroma collection to save data to
         """
-        batch_size = 256
+        # Get optimal batch size based on GPU availability and memory
+        from utils.gpu_utils import get_optimal_batch_size, is_gpu_available, get_device_string
+        
+        # Larger batches for embedding generation when using GPU
+        base_batch_size = get_optimal_batch_size() * 8 if is_gpu_available() else 64
+        batch_size = min(base_batch_size, 256)  # Cap at 256 to avoid memory issues
+        
         df_batches = self._divide_dataframe(st.session_state.chunks_df, batch_size)
         
         if not df_batches:
@@ -289,7 +296,8 @@ class DataProcessor:
             return
             
         num_batches = len(df_batches)
-        progress_text = "Saving data to Chroma. Please wait..."
+        device_info = f"on {get_device_string()}" if is_gpu_available() else "on CPU"
+        progress_text = f"Saving data to Chroma {device_info}. Please wait..."
         progress_bar = st.progress(0, text=progress_text)
 
         for i, batch_df in enumerate(df_batches):
@@ -298,15 +306,16 @@ class DataProcessor:
                 progress_percentage = int(((i + 1) / num_batches) * 100)
                 progress_bar.progress(
                     progress_percentage / 100, 
-                    text=f"Processing batch {i + 1}/{num_batches}"
+                    text=f"Processing batch {i + 1}/{num_batches} {device_info}"
                 )
-                time.sleep(0.1)
+                # No need for sleep when processing is intensive
 
         progress_bar.empty()
         
     def _process_batch(self, batch_df, model, collection):
         """
         Encode and save a batch of data to Chroma.
+        Now with GPU awareness for better performance.
         
         Args:
             batch_df (DataFrame): DataFrame containing batch data
@@ -314,7 +323,7 @@ class DataProcessor:
             collection: Chroma collection to add data to
         """
         try:
-            # Encode column data to vectors for this batch
+            # Using model on appropriate device (GPU/CPU) as configured earlier
             embeddings = model.encode(batch_df['chunk'].tolist())
 
             # Collect all metadata in one list
