@@ -30,7 +30,7 @@ def run_quality_check_with_analysis(project_id, hw_number, config_path=None, emb
                                    llm_model=None, num_docs_retrieval=3):
     """
     Run quality check and automatically analyze results with LLM.
-    Extracts error messages from quality-check-report.json for targeted vector search.
+    Now displays the prompt before sending to LLM.
     
     Args:
         project_id (str): Project ID to analyze
@@ -86,6 +86,7 @@ def run_quality_check_with_analysis(project_id, hw_number, config_path=None, emb
     
     # Create targeted queries based on the quality report findings
     queries = generate_targeted_queries(json_data)
+    print("query Data:==================================================== ", queries)
     
     # Search vector database for each query
     all_metadatas = []
@@ -121,8 +122,13 @@ def run_quality_check_with_analysis(project_id, hw_number, config_path=None, emb
     combined_data = "\n\n".join(all_retrieved_data) if all_retrieved_data else "No relevant documentation found."
     
     # Prepare prompt for LLM
-    status_placeholder.info("Generating analysis with LLM...")
     prompt = create_analysis_prompt(analysis_text, combined_data, project_id, hw_number)
+    
+    # Show the prompt in the status placeholder
+    status_placeholder.info(f"Sending prompt to LLM. First 150 chars: {prompt[:150]}...")
+    
+    # Print the full prompt to the console for debugging
+    print("\n--- PROMPT FOR LLM ---\n", prompt, "\n--- END PROMPT ---\n")
     
     # Generate analysis with LLM
     try:
@@ -150,6 +156,8 @@ def run_quality_check_with_analysis(project_id, hw_number, config_path=None, emb
 def generate_targeted_queries(json_data: Dict[str, Any]) -> Dict[str, str]:
     """
     Generate targeted search queries based on quality report findings.
+    - Build errors are extracted from logs.build.errors.details.message
+    - Checkstyle violations are extracted only from logs.checkstyle.violations.details.rule
     
     Args:
         json_data (dict): Parsed quality report JSON
@@ -205,37 +213,30 @@ def generate_targeted_queries(json_data: Dict[str, Any]) -> Dict[str, str]:
             if error_messages:
                 queries["build_errors"] = " OR ".join(error_messages)
     
-    # Extract checkstyle violations - specifically from logs.checkstyle.violations.details.message
+    # Extract checkstyle violations - Extract rule name and convert to natural language
     if "logs" in json_data and "checkstyle" in json_data["logs"]:
         checkstyle_logs = json_data["logs"]["checkstyle"]
         if "violations" in checkstyle_logs and "details" in checkstyle_logs["violations"]:
             violations = checkstyle_logs["violations"]["details"]
-            violation_messages = set()  # Use set to avoid duplicates
+            rule_names = set()  # Set for processed rule names
             
             for violation in violations:
-                # Extract the actual violation message
-                message = violation.get("message", "")
+                # Extract the exact rule name
                 rule = violation.get("rule", "")
                 
-                if message:
-                    # Clean and extract key terms from the message
-                    clean_message = message.replace("'", "").replace("\"", "")
-                    # Take first 5-8 words for better search
-                    words = clean_message.split()[:8]
-                    if words:
-                        violation_messages.add("checkstyle " + " ".join(words))
-                
-                # Also include the rule name for better context
                 if rule:
-                    # Format the rule name for better search
-                    clean_rule = rule.replace("Check", "")
-                    # Split camel case into words
-                    words = re.findall(r'[A-Z][a-z]*', clean_rule)
-                    if words:
-                        violation_messages.add("checkstyle " + " ".join(words).lower())
+                    # Convert camelCase to natural language with spaces
+                    # First, find boundaries between lowercase and uppercase letters
+                    natural_rule = re.sub(r'([a-z])([A-Z])', r'\1 \2', rule)
+                    
+                    # Also handle consecutive uppercase letters followed by lowercase
+                    natural_rule = re.sub(r'([A-Z])([A-Z][a-z])', r'\1 \2', natural_rule)
+                    
+                    # Add the natural language version to our set
+                    rule_names.add(natural_rule)
             
-            if violation_messages:
-                queries["checkstyle_violations"] = " OR ".join(violation_messages)
+            if rule_names:
+                queries["checkstyle_violations"] = " OR ".join(rule_names)
     
     return queries
 
