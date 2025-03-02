@@ -30,14 +30,17 @@ from utils.gpu_utils import (
 )
 
 from utils.auto_quality_check import (
-    run_quality_check_with_analysis, 
-    generate_search_query,
+    run_quality_check_with_analysis,
+    generate_targeted_queries, 
     vector_search,
+    format_search_results_compact,
     format_search_results,
+    create_analysis_prompt,
     get_build_checkstyle_dir,
     run_quality_check,
     analyze_quality_report,
     render_quality_check_widget_in_chatbot
+
     )
 
 from utils.enhanced_vector_search import(
@@ -93,10 +96,12 @@ __all__ = [
     'get_device_string',
 
     # Auto quality check
-    'run_quality_check_with_analysis', 
-    'generate_search_query',
+    'run_quality_check_with_analysis',
+    'generate_targeted_queries', 
     'vector_search',
+    'format_search_results_compact',
     'format_search_results',
+    'create_analysis_prompt',
     'get_build_checkstyle_dir',
     'run_quality_check',
     'analyze_quality_report',

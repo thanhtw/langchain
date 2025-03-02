@@ -18,9 +18,19 @@ import time
 import re
 import pandas as pd
 
-def run_quality_check_with_analysis(project_id, hw_number, config_path=None, embedding_model=None, active_collections=None, columns_to_answer=None, llm_model=None, num_docs_retrieval=3):
+"""
+Enhanced quality check runner with automatic LLM analysis.
+Optimized vector search for code quality violations.
+"""
+from typing import List, Dict, Any, Tuple, Optional, Union
+
+
+def run_quality_check_with_analysis(project_id, hw_number, config_path=None, embedding_model=None, 
+                                   active_collections=None, columns_to_answer=None, 
+                                   llm_model=None, num_docs_retrieval=3):
     """
     Run quality check and automatically analyze results with LLM.
+    Extracts error messages from quality-check-report.json for targeted vector search.
     
     Args:
         project_id (str): Project ID to analyze
@@ -71,28 +81,48 @@ def run_quality_check_with_analysis(project_id, hw_number, config_path=None, emb
     st.session_state.quality_report_analysis = analysis_text
     st.session_state.quality_report_data = json_data
     
-    # Perform vector search for relevant information
-    status_placeholder.info("Retrieving relevant documentation...")
+    # Perform targeted vector search for relevant information
+    status_placeholder.info("Retrieving relevant documentation for violations...")
     
-    # Create a query based on the quality report findings
-    query = generate_search_query(json_data)
+    # Create targeted queries based on the quality report findings
+    queries = generate_targeted_queries(json_data)
     
-    # Search vector database
-    try:
-        metadatas, retrieved_data = vector_search(
-            embedding_model,
-            query,
-            active_collections,
-            columns_to_answer,
-            num_docs_retrieval
-        )
-    except Exception as e:
-        status_placeholder.error(f"Error searching vector database: {str(e)}")
-        return False, f"Vector search failed: {str(e)}", None
+    # Search vector database for each query
+    all_metadatas = []
+    all_retrieved_data = []
+    
+    for query_type, query in queries.items():
+        if not query:
+            continue
+            
+        try:
+            status_placeholder.info(f"Searching for {query_type} information...")
+            metadatas, retrieved_data = vector_search(
+                embedding_model,
+                query,
+                active_collections,
+                columns_to_answer,
+                num_docs_retrieval // len(queries)  # Divide docs between queries
+            )
+            
+            if metadatas and metadatas[0]:
+                # Add query type to metadata for reference
+                for metadata in metadatas[0]:
+                    metadata['query_type'] = query_type
+                all_metadatas.extend(metadatas[0])
+                
+            if retrieved_data:
+                all_retrieved_data.append(f"--- {query_type.upper()} DOCUMENTATION ---\n{retrieved_data}")
+                
+        except Exception as e:
+            status_placeholder.warning(f"Error searching for {query_type}: {str(e)}")
+    
+    # Combine the retrieved data
+    combined_data = "\n\n".join(all_retrieved_data) if all_retrieved_data else "No relevant documentation found."
     
     # Prepare prompt for LLM
     status_placeholder.info("Generating analysis with LLM...")
-    prompt = create_analysis_prompt(analysis_text, retrieved_data, project_id, hw_number)
+    prompt = create_analysis_prompt(analysis_text, combined_data, project_id, hw_number)
     
     # Generate analysis with LLM
     try:
@@ -100,9 +130,16 @@ def run_quality_check_with_analysis(project_id, hw_number, config_path=None, emb
         status_placeholder.success("Analysis complete!")
         
         # Display sidebar information if needed
-        if metadatas and metadatas[0]:
+        if all_metadatas:
+            # Create dataframe with relevant columns only
+            display_df = pd.DataFrame([{
+                'Source': m.get('source_collection', 'Unknown'),
+                'Type': m.get('query_type', 'General'),
+                'Score': round(m.get('score', 0), 2) if 'score' in m else 'N/A'
+            } for m in all_metadatas])
+            
             st.sidebar.subheader("Retrieved References")
-            st.sidebar.dataframe(pd.DataFrame(metadatas[0]))
+            st.sidebar.dataframe(display_df)
         
         # Return the result
         return True, "Quality check and analysis completed successfully", llm_response
@@ -110,80 +147,102 @@ def run_quality_check_with_analysis(project_id, hw_number, config_path=None, emb
         status_placeholder.error(f"Error generating analysis: {str(e)}")
         return False, f"LLM analysis failed: {str(e)}", None
 
-def generate_search_query(json_data):
+def generate_targeted_queries(json_data: Dict[str, Any]) -> Dict[str, str]:
     """
-    Generate a search query based on quality report findings.
+    Generate targeted search queries based on quality report findings.
     
     Args:
         json_data (dict): Parsed quality report JSON
         
     Returns:
-        str: Generated query for vector search
+        dict: Dictionary of query types and their search strings
     """
-    query_parts = []
+    queries = {
+        "build_errors": "",
+        "checkstyle_violations": "",
+        "general_practices": "java code best practices and common errors"
+    }
     
-    # Add build errors if any
+    # Extract build errors - specifically from logs.build.errors.details.message
     if "logs" in json_data and "build" in json_data["logs"]:
         build_logs = json_data["logs"]["build"]
         if "errors" in build_logs and "details" in build_logs["errors"]:
             errors = build_logs["errors"]["details"]
+            error_messages = []
+            
             for error in errors:
                 message = error.get("message", "")
                 if message:
-                    query_parts.append(f"java error {message}")
+                    # Clean the message for search
+                    clean_message = message.replace("'", "").replace("\"", "")
+                    # Extract key phrases from the error message
+                    key_phrases = []
+                    
+                    # Look for specific error patterns
+                    if "cannot find symbol" in clean_message.lower():
+                        # Extract the symbol name
+                        symbol_match = re.search(r'symbol:\s+(\w+)', clean_message)
+                        if symbol_match:
+                            key_phrases.append(f"java cannot find symbol {symbol_match.group(1)}")
+                    elif "incompatible types" in clean_message.lower():
+                        # Extract the type information
+                        types_match = re.search(r'(\w+)\s+cannot be converted to\s+(\w+)', clean_message)
+                        if types_match:
+                            key_phrases.append(f"java convert {types_match.group(1)} to {types_match.group(2)}")
+                    elif "missing return statement" in clean_message.lower():
+                        key_phrases.append("java missing return statement")
+                    else:
+                        # For other errors, extract the first meaningful phrase
+                        first_line = clean_message.split('\n')[0].strip()
+                        # Limit to first 6 words for better search results
+                        words = first_line.split()[:6]
+                        if words:
+                            key_phrases.append("java " + " ".join(words))
+                    
+                    # Add all valid phrases to our search terms
+                    error_messages.extend([phrase for phrase in key_phrases if phrase])
+            
+            if error_messages:
+                queries["build_errors"] = " OR ".join(error_messages)
     
-    # Add checkstyle violations if any
+    # Extract checkstyle violations - specifically from logs.checkstyle.violations.details.message
     if "logs" in json_data and "checkstyle" in json_data["logs"]:
         checkstyle_logs = json_data["logs"]["checkstyle"]
         if "violations" in checkstyle_logs and "details" in checkstyle_logs["violations"]:
             violations = checkstyle_logs["violations"]["details"]
-            for violation in violations[:3]:  # Limit to top 3 violations
+            violation_messages = set()  # Use set to avoid duplicates
+            
+            for violation in violations:
+                # Extract the actual violation message
+                message = violation.get("message", "")
                 rule = violation.get("rule", "")
+                
+                if message:
+                    # Clean and extract key terms from the message
+                    clean_message = message.replace("'", "").replace("\"", "")
+                    # Take first 5-8 words for better search
+                    words = clean_message.split()[:8]
+                    if words:
+                        violation_messages.add("checkstyle " + " ".join(words))
+                
+                # Also include the rule name for better context
                 if rule:
-                    query_parts.append(f"checkstyle rule {rule}")
+                    # Format the rule name for better search
+                    clean_rule = rule.replace("Check", "")
+                    # Split camel case into words
+                    words = re.findall(r'[A-Z][a-z]*', clean_rule)
+                    if words:
+                        violation_messages.add("checkstyle " + " ".join(words).lower())
+            
+            if violation_messages:
+                queries["checkstyle_violations"] = " OR ".join(violation_messages)
     
-    # Create a combined query
-    if query_parts:
-        return " OR ".join(query_parts)
-    else:
-        return "java code best practices and common errors"
-
-def create_analysis_prompt(analysis_text, retrieved_data, project_id, hw_number):
-    """
-    Create a comprehensive prompt for LLM analysis.
-    
-    Args:
-        analysis_text (str): Quality report analysis text
-        retrieved_data (str): Retrieved vector data
-        project_id (str): Project ID
-        hw_number (str): Homework number
-        
-    Returns:
-        str: Formatted prompt
-    """
-    prompt = f"""You are a professional code quality analyst and programming instructor. 
-Analyze the following code quality issues for Project {project_id}, {hw_number}, and provide detailed explanations and solutions.
-
-CODE QUALITY ANALYSIS:
-{analysis_text}
-
-RELEVANT DOCUMENTATION:
-{retrieved_data}
-
-Please provide a comprehensive analysis of the build errors and checkstyle violations found in the report. For each issue:
-1. Explain what the error or violation means in simple terms
-2. Explain why it's important to fix it (impact on code quality, reliability, etc.)
-3. Provide a step-by-step solution to fix the issue
-4. If possible, show both the incorrect code and the corrected code
-
-Also include a summary of the overall code quality issues and general recommendations for improving the code.
-Be educational and helpful, as if you're teaching a student how to write better code."""
-
-    return prompt
+    return queries
 
 def vector_search(model, query, active_collections, columns_to_answer, number_docs_retrieval):
     """
-    Perform vector search across multiple collections.
+    Perform targeted vector search across multiple collections.
+    Optimized for code quality analysis queries.
     
     Args:
         model: The embedding model to use
@@ -197,6 +256,9 @@ def vector_search(model, query, active_collections, columns_to_answer, number_do
     """
     all_metadatas = []
     filtered_metadatas = []
+    
+    if not query:
+        return [], "No valid search query provided."
     
     # Generate query embeddings
     query_embeddings = model.encode([query])
@@ -236,10 +298,48 @@ def vector_search(model, query, active_collections, columns_to_answer, number_do
                 filtered_metadata[column] = metadata[column]
         filtered_metadatas.append(filtered_metadata)
         
-    # Format the search results
-    search_result = format_search_results(filtered_metadatas, columns_to_answer)
+    # Format the search results - keep content more compact for LLM context
+    search_result = format_search_results_compact(filtered_metadatas, columns_to_answer)
     
     return [filtered_metadatas], search_result
+
+def format_search_results_compact(metadatas, columns_to_answer):
+    """
+    Format search results in a more compact way for LLM processing.
+    
+    Args:
+        metadatas (list): List of metadata dictionaries
+        columns_to_answer (list): Columns to include in the result
+        
+    Returns:
+        str: Formatted search result string
+    """
+    search_result = ""
+    for i, metadata in enumerate(metadatas, 1):
+        source = metadata.get('source_collection', 'Unknown')
+        search_result += f"[{i}] Source: {source}\n"
+        
+        for column in columns_to_answer:
+            if column in metadata:
+                content = metadata.get(column)
+                
+                # Handle different content types
+                if isinstance(content, str):
+                    # Truncate content if it's extremely long
+                    if len(content) > 1000:
+                        content = content[:1000] + "... [truncated]"
+                    
+                    # Replace multiple newlines with single newlines
+                    content = re.sub(r'\n+', '\n', content)
+                    
+                    search_result += f"{column}: {content}\n"
+                else:
+                    search_result += f"{column}: {content}\n"
+        
+        # Add separator between entries
+        search_result += "-" * 40 + "\n"
+    
+    return search_result
 
 def format_search_results(metadatas, columns_to_answer):
     """
@@ -259,6 +359,40 @@ def format_search_results(metadatas, columns_to_answer):
             if column in metadata:
                 search_result += f"   {column.capitalize()}: {metadata.get(column)}\n"
     return search_result
+
+def create_analysis_prompt(analysis_text, retrieved_data, project_id, hw_number):
+    """
+    Create a comprehensive prompt for LLM analysis.
+    Optimized for targeted code quality review using extracted error messages.
+    
+    Args:
+        analysis_text (str): Quality report analysis text
+        retrieved_data (str): Retrieved vector data
+        project_id (str): Project ID
+        hw_number (str): Homework number
+        
+    Returns:
+        str: Formatted prompt
+    """
+    prompt = f"""You are a professional code quality analyst and programming instructor. 
+Analyze the following code quality issues for Project {project_id}, {hw_number}, and provide detailed explanations and solutions.
+
+CODE QUALITY ANALYSIS:
+{analysis_text}
+
+RELEVANT DOCUMENTATION:
+{retrieved_data}
+
+Provide a targeted analysis focusing on the specific error messages from the report:
+1. For each build error message in the report, explain what it means and how to fix it
+2. For each checkstyle violation message, explain what coding standard is being violated and how to correct it
+3. Provide clear example code showing both incorrect and corrected versions where possible
+
+Include a brief summary of key issues and general recommendations at the end.
+Be clear and concise in your explanations - focus on practical guidance.
+"""
+
+    return prompt
 
 def get_build_checkstyle_dir(config_path=None):
     """
@@ -517,10 +651,10 @@ def analyze_quality_report(json_path):
     except Exception as e:
         return f"Error analyzing quality report: {str(e)}", None
 
-# Function to render integrated quality check widget in chatbot section
 def render_quality_check_widget_in_chatbot():
     """
     Add a quality check widget integrated into the chatbot UI.
+    Compact version for better UI experience.
     """
     with st.expander("Run Code Quality Check", expanded=False):
         col1, col2 = st.columns(2)
@@ -563,22 +697,24 @@ def render_quality_check_widget_in_chatbot():
                 )
                 
                 if success and analysis_result:
-                    # Display the analysis
-                    st.markdown("### Quality Analysis Results")
-                    st.markdown(analysis_result)
-                    
-                    # Add to chat history
+                    # Add to chat history in a compact form
                     if "chat_history" not in st.session_state:
                         st.session_state.chat_history = []
                     
+                    # Create a more compact version of the user query
+                    user_query = f"Analyze code quality for Project {project_id}, {hw_number} and provide solutions"
                     st.session_state.chat_history.append({
                         "role": "user", 
-                        "content": f"Analyze code quality for Project {project_id}, {hw_number} and provide solutions to fix the issues."
+                        "content": user_query
                     })
                     
+                    # Add LLM response to chat history with full content
                     st.session_state.chat_history.append({
                         "role": "assistant", 
                         "content": analysis_result
                     })
+                    
+                    # Force a rerun to show the updated chat history
+                    st.rerun()
                 else:
                     st.error(message)

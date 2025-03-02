@@ -189,7 +189,7 @@ def main():
                 
                 prompt_library.add_template(new_template)
                 st.success(f"Template '{new_name}' created successfully!")
-                st.experimental_rerun()
+                st.rerun()
     
     # Edit Template Tab
     with tab_edit:
@@ -237,13 +237,13 @@ def main():
                             
                             prompt_library.add_template(updated_template)
                             st.success(f"Template '{edit_name}' updated successfully!")
-                            st.experimental_rerun()
+                            st.rerun()
                 
                 with col2:
                     if st.button("Delete Template"):
                         if prompt_library.remove_template(template.name):
                             st.success(f"Template '{template.name}' deleted successfully!")
-                            st.experimental_rerun()
+                            st.rerun()
                         else:
                             st.error(f"Failed to delete template '{template.name}'.")
     

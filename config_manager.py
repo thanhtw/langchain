@@ -319,82 +319,181 @@ class ConfigManager:
         if gpu_available:
             st.success(f"GPU acceleration will be enabled ({gpu_info['name']})")
         
-        # Rest of the method...
+        # Browse local models
+        st.write("#### Select a Model")
+        local_models = self.langchain_manager.get_models_for_provider(provider)
         
-        # When configuring GPU layers:
-        n_ctx = st.number_input(
-            "Context Length:",
-            min_value=512,
-            max_value=8192,
-            value=4096,
-            step=512,
-            help="Maximum context length. Higher values use more memory."
+        if not local_models:
+            st.info(f"No {provider} models found in models directory.")
+            st.write("You can:")
+            st.write("1. Download a model using the button below")
+            st.write("2. Manually add .gguf files to the 'models' directory")
+            
+            # Option to download recommended models
+            st.write("#### Download Recommended Models")
+            
+            recommended_models = {
+                "llama-3-8b-instruct.Q4_K_M.gguf": "Llama 3 8B (4-bit, ~4.5GB)",
+                "deepseek-coder-6.7b-instruct.Q4_K_M.gguf": "DeepSeek Coder 6.7B (4-bit, ~4GB)",
+                "phi-3-mini-4k-instruct.Q4_K_M.gguf": "Phi-3 Mini (4-bit, ~1.8GB)",
+                "gemma-2b-it.Q4_K_M.gguf": "Gemma 2B Instruct (4-bit, ~1.5GB)"
+            }
+            
+            col1, col2 = st.columns(2)
+            selected_model = None
+            
+            with col1:
+                selected_model_name = st.selectbox(
+                    "Select a model to download:",
+                    list(recommended_models.keys()),
+                    format_func=lambda x: recommended_models.get(x, x)
+                )
+                
+            with col2:
+                if st.button("Download Selected Model"):
+                    with st.spinner(f"Downloading {selected_model_name}..."):
+                        from utils.model_downloader import RECOMMENDED_MODELS, download_model_with_streamlit
+                        
+                        model_info = {selected_model_name: RECOMMENDED_MODELS[selected_model_name]}
+                        selected_model = download_model_with_streamlit(model_info)
+                        
+                        if selected_model:
+                            st.success(f"Downloaded {selected_model_name} successfully!")
+                            st.rerun()
+                        else:
+                            st.error(f"Failed to download {selected_model_name}")
+            
+            if not selected_model:
+                return
+        
+        # Model selection
+        model_options = []
+        for model in local_models:
+            model_options.append({"name": f"{model['name']} - {model['description']}", "path": model['id']})
+        
+        selected_model_option = st.selectbox(
+            "Choose a model:",
+            options=model_options,
+            format_func=lambda x: x["name"]
         )
         
-        # GPU layers - automatically set if GPU is available
-        if gpu_available:
-            max_gpu_layers_default = 35  # Good default value for most GPUs
-            gpu_memory = gpu_info.get("memory_gb", 0)
+        if selected_model_option:
+            selected_model_name = selected_model_option["name"]
+            model_path = selected_model_option["path"]
             
-            # Adjust based on GPU memory
-            if gpu_memory < 4:
-                max_gpu_layers_default = 20
-            elif gpu_memory > 16:
-                max_gpu_layers_default = 50
+            st.write(f"Selected model: **{selected_model_name}**")
+            
+            # Model type for ctransformers
+            model_type_value = None
+            if provider == "ctransformers":
+                model_family = self.langchain_manager.get_model_family(model_path)
+                model_types = ["llama", "mistral", "phi", "gemma", "deepseek", "other"]
                 
-            max_gpu_layers = st.number_input(
-                "GPU Layers:",
-                min_value=0,
-                max_value=100,
-                value=max_gpu_layers_default,
-                step=5,
-                help="Higher values use more GPU memory but provide better performance."
-            )
-        else:
-            max_gpu_layers = 0
-            st.info("No GPU detected - GPU layers set to 0 (CPU-only mode)")
-        
-        # Store parameters
-        params = {
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-            "n_ctx": n_ctx,
-            "n_gpu_layers": max_gpu_layers
-        }
-        
-        if model_type_value:
-            params["model_type"] = model_type_value
-        
-        st.session_state.model_params = params
-        
-        # Initialize button            
-        if st.button("Initialize Selected Model"):
-            with st.spinner(f"Initializing {selected_model_name}..."):
-                # Import the optimize_model_params function to ensure proper GPU utilization
-                from utils.gpu_utils import optimize_model_params, get_device_string
-                
-                # Optimize parameters for GPU when available
-                optimized_params = optimize_model_params(
-                    st.session_state.model_params, 
-                    provider
-                )
-                
-                llm = self.langchain_manager.initialize_llm(
-                    model_path, 
-                    provider, 
-                    optimized_params
-                )
-                
-                if llm:
-                    st.session_state.llm_name = model_path
-                    st.session_state.llm_provider = provider
-                    st.session_state.llm_type = LANGCHAIN_LLM
-                    st.session_state.llm_model = llm
-                    st.success(f"Successfully initialized {selected_model_name} on {get_device_string()}!")
+                if model_family and model_family != "other":
+                    default_index = model_types.index(model_family) if model_family in model_types else 0
                 else:
-                    st.error(f"Failed to initialize {selected_model_name}.")
+                    default_index = 0
+                    
+                model_type_value = st.selectbox(
+                    "Model Type:",
+                    model_types,
+                    index=default_index,
+                    help="Select the architecture type of the model."
+                )
+            
+            # Temperature slider
+            temperature = st.slider(
+                "Temperature:",
+                min_value=0.0,
+                max_value=1.0,
+                value=0.7,
+                step=0.1,
+                help="Higher values make output more random, lower values more deterministic."
+            )
+            
+            # Max tokens slider
+            max_tokens = st.slider(
+                "Max Tokens:",
+                min_value=64,
+                max_value=4096,
+                value=512,
+                step=64,
+                help="Maximum number of tokens to generate."
+            )
+            
+            # Context length
+            n_ctx = st.number_input(
+                "Context Length:",
+                min_value=512,
+                max_value=8192,
+                value=4096,
+                step=512,
+                help="Maximum context length. Higher values use more memory."
+            )
+            
+            # GPU layers - automatically set if GPU is available
+            if gpu_available:
+                max_gpu_layers_default = 35  # Good default value for most GPUs
+                gpu_memory = gpu_info.get("memory_gb", 0)
+                
+                # Adjust based on GPU memory
+                if gpu_memory < 4:
+                    max_gpu_layers_default = 20
+                elif gpu_memory > 16:
+                    max_gpu_layers_default = 50
+                    
+                max_gpu_layers = st.number_input(
+                    "GPU Layers:",
+                    min_value=0,
+                    max_value=100,
+                    value=max_gpu_layers_default,
+                    step=5,
+                    help="Higher values use more GPU memory but provide better performance."
+                )
+            else:
+                max_gpu_layers = 0
+                st.info("No GPU detected - GPU layers set to 0 (CPU-only mode)")
+            
+            # Store parameters
+            params = {
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+                "n_ctx": n_ctx,
+                "n_gpu_layers": max_gpu_layers
+            }
+            
+            if model_type_value:
+                params["model_type"] = model_type_value
+            
+            st.session_state.model_params = params
+            
+            # Initialize button            
+            if st.button("Initialize Selected Model"):
+                with st.spinner(f"Initializing {selected_model_name}..."):
+                    # Import the optimize_model_params function to ensure proper GPU utilization
+                    from utils.gpu_utils import optimize_model_params, get_device_string
+                    
+                    # Optimize parameters for GPU when available
+                    optimized_params = optimize_model_params(
+                        st.session_state.model_params, 
+                        provider
+                    )
+                    
+                    llm = self.langchain_manager.initialize_llm(
+                        model_path, 
+                        provider, 
+                        optimized_params
+                    )
+                    
+                    if llm:
+                        st.session_state.llm_name = model_path
+                        st.session_state.llm_provider = provider
+                        st.session_state.llm_type = LANGCHAIN_LLM
+                        st.session_state.llm_model = llm
+                        st.success(f"Successfully initialized {selected_model_name} on {get_device_string()}!")
+                    else:
+                        st.error(f"Failed to initialize {selected_model_name}.")
 
-    # 2. In the _render_transformers_setup method:
     def _render_transformers_setup(self):
         """Render setup for HuggingFace Transformers models."""
         st.write("### HuggingFace Transformers")
@@ -500,7 +599,7 @@ class ConfigManager:
                 if st.button("Initialize Selected Model"):
                     with st.spinner(f"Initializing {model_id}..."):
                         # Import the optimize_model_params function to ensure proper GPU utilization
-                        from utils.gpu_utils import optimize_model_params
+                        from utils.gpu_utils import optimize_model_params, get_device_string
                         
                         # Optimize parameters for GPU when available
                         optimized_params = optimize_model_params(
@@ -581,7 +680,7 @@ class ConfigManager:
 
     def vector_search(self, model, query, active_collections, columns_to_answer, number_docs_retrieval):
         """
-        Perform vector search across multiple collections.
+        Perform vector search across multiple collections with improved error handling.
         
         Args:
             model: The embedding model to use
@@ -610,57 +709,88 @@ class ConfigManager:
             all_metadatas = []
             filtered_metadatas = []
             
-            # Generate query embeddings
+            # Generate query embeddings with error handling
             try:
                 query_embeddings = model.encode([query])
+                # Convert to list if it returns numpy array
+                if hasattr(query_embeddings, "tolist"):
+                    query_embeddings = query_embeddings.tolist()
             except Exception as e:
                 st.error(f"Error generating embeddings: {str(e)}")
                 return [], ""
             
-            # Search each active collection
+            # Search each active collection with better error handling
             for collection_name, collection in active_collections.items():
                 try:
+                    # Verify collection is valid
+                    if not collection:
+                        print(f"Warning: Collection {collection_name} is not valid")
+                        continue
+                    
+                    # Add defensive check for query_embeddings format
+                    if not isinstance(query_embeddings, list):
+                        query_embeddings = [query_embeddings]
+                    
+                    # Execute the query with explicit parameters
                     results = collection.query(
                         query_embeddings=query_embeddings,
-                        n_results=number_docs_retrieval
+                        n_results=min(number_docs_retrieval, 10),  # Limit to avoid potential errors
+                        include=['metadatas']
                     )
                     
                     if results and 'metadatas' in results and results['metadatas']:
-                        # Add collection name to each metadata item
-                        for meta_list in results['metadatas']:
-                            for meta in meta_list:
+                        # Validate and process metadatas
+                        for i, meta_list in enumerate(results['metadatas']):
+                            for j, meta in enumerate(meta_list):
+                                # Skip invalid metadata entries
+                                if not isinstance(meta, dict):
+                                    print(f"Warning: Invalid metadata in collection {collection_name}")
+                                    continue
+                                    
+                                # Add source collection to metadata
                                 meta['source_collection'] = collection_name
+                                
+                                # Add a unique ID to help with tracking
+                                meta['result_id'] = f"{collection_name}_{i}_{j}"
                         
-                        # Flatten the nested metadata structure
+                        # Add to the combined results
                         for meta_list in results['metadatas']:
-                            all_metadatas.extend(meta_list)
-                            
+                            # Only add valid dictionary entries
+                            all_metadatas.extend([m for m in meta_list if isinstance(m, dict)])
+                                
                 except Exception as e:
-                    st.error(f"Error searching collection {collection_name}: {str(e)}")
+                    print(f"Error searching collection {collection_name}: {str(e)}")
+                    # Continue to next collection instead of failing the entire search
                     continue
             
             if not all_metadatas:
-                st.info("No relevant results found in any collection.")
-                return [], ""
+                return [], "No relevant results found in any collection."
             
             # Filter metadata to only include selected columns plus source collection
             for metadata in all_metadatas:
-                filtered_metadata = {
-                    'source_collection': metadata.get('source_collection', 'Unknown')
-                }
-                for column in columns_to_answer:
-                    if column in metadata:
-                        filtered_metadata[column] = metadata[column]
-                filtered_metadatas.append(filtered_metadata)
+                try:
+                    filtered_metadata = {
+                        'source_collection': metadata.get('source_collection', 'Unknown')
+                    }
+                    for column in columns_to_answer:
+                        if column in metadata:
+                            filtered_metadata[column] = metadata[column]
+                    filtered_metadatas.append(filtered_metadata)
+                except Exception as e:
+                    print(f"Error filtering metadata: {str(e)}")
+                    # Continue processing other metadata entries
+                    continue
                 
             # Format the search results
-            search_result = self._format_search_results(filtered_metadatas, columns_to_answer)
-            
-            return [filtered_metadatas], search_result
-            
+            if filtered_metadatas:
+                search_result = self._format_search_results(filtered_metadatas, columns_to_answer)
+                return [filtered_metadatas], search_result
+            else:
+                return [], "No results after filtering."
+                
         except Exception as e:
-            st.error(f"Error in vector search: {str(e)}")
-            return [], ""
+            print(f"Error in vector search: {str(e)}")
+            return [], f"Search error: {str(e)[:100]}..."  # Limit error message length
             
     def _format_search_results(self, metadatas, columns_to_answer):
         """
@@ -683,7 +813,7 @@ class ConfigManager:
 
     def _render_chatbot_section(self, section_num):
         """
-        Render interactive chatbot section.
+        Render interactive chatbot section with optimized UI.
         
         Args:
             section_num (int): Section number for header
@@ -697,14 +827,16 @@ class ConfigManager:
         # Allow user to select columns
         self._render_column_selector()
         
+        # Add the quality check widget
+        from utils.auto_quality_check import render_quality_check_widget_in_chatbot
         render_quality_check_widget_in_chatbot()
 
         # Initialize chat history if needed
         if "chat_history" not in st.session_state:
             st.session_state.chat_history = []
 
-        # Display chat history
-        self._display_chat_history()
+        # Display chat history with optimization
+        self._display_optimized_chat_history()
 
         # Handle new user input
         if prompt := st.chat_input("Ask a question..."):
@@ -738,26 +870,305 @@ class ConfigManager:
             "Select one or more columns LLMs should answer from:", 
             available_columns
         )
-        
-    def _display_chat_history(self):
-        """Display the chat history."""
+    
+    def _display_optimized_chat_history(self):
+        """Display the chat history with optimization for readability."""
         for message in st.session_state.chat_history:
             with st.chat_message(message["role"]):
-                st.markdown(message["content"])
+                content = message["content"]
                 
+                # Optimize content display for readability
+                if len(content) > 2000 and message["role"] == "assistant":
+                    # Display a summary version first
+                    with st.expander("View full response", expanded=False):
+                        st.markdown(content)
+                    
+                    # Extract and display key sections
+                    sections = self._extract_key_sections(content)
+                    st.markdown(sections)
+                else:
+                    st.markdown(content)
+
+    def _extract_key_sections(self, content):
+        """
+        Extract key sections from a long response to show a more concise version.
+        
+        Args:
+            content (str): The full response content
+            
+        Returns:
+            str: A condensed version with key sections
+        """
+        # Try to identify sections with headers using markdown patterns
+        headers = re.findall(r'(#{1,3}\s+.*?)(?=\n)', content)
+        
+        if not headers or len(headers) < 2:
+            # If no clear sections, return the first part with ellipsis
+            if len(content) > 1500:
+                return content[:1500] + "...\n\n*Expand above to see full response*"
+            return content
+        
+        # Extract key sections (first part, summaries, recommendations)
+        result = []
+        
+        # First paragraph (likely introduction)
+        intro_match = re.match(r'^.*?(?=\n\n|\n#)', content, re.DOTALL)
+        if intro_match:
+            result.append(intro_match.group(0))
+        
+        # Look for specific important sections
+        important_sections = [
+            (r'#{1,3}\s+Summary.*?(?=\n#{1,3}|\Z)', 'summary'),
+            (r'#{1,3}\s+Recommendations.*?(?=\n#{1,3}|\Z)', 'recommendations'),
+            (r'#{1,3}\s+Key Issues.*?(?=\n#{1,3}|\Z)', 'key issues'),
+            (r'#{1,3}\s+Conclusion.*?(?=\n#{1,3}|\Z)', 'conclusion')
+        ]
+        
+        for pattern, section_type in important_sections:
+            section_match = re.search(pattern, content, re.IGNORECASE | re.DOTALL)
+            if section_match:
+                result.append(section_match.group(0))
+        
+        # If no important sections found, pick the first and last sections
+        if len(result) <= 1:
+            for header in [headers[0], headers[-1]]:
+                header_pattern = re.escape(header)
+                section_match = re.search(f'{header_pattern}.*?(?=\n#|\Z)', content, re.DOTALL)
+                if section_match and section_match.group(0) not in result:
+                    result.append(section_match.group(0))
+        
+        # Combine results with note about full content
+        combined = "\n\n".join(result) 
+        if len(combined) < len(content):
+            combined += "\n\n*Expand above to see full response*"
+            
+        return combined
+
+    def _handle_quality_analysis_query(self, prompt, search_status):
+        """
+        Handle a code quality analysis query.
+        
+        Args:
+            prompt (str): User's prompt
+            search_status: Status placeholder
+        """
+        search_status.info("Analyzing code quality information...")
+        
+        # Check for quality report analysis in session state
+        json_analysis = ""
+        if hasattr(st.session_state, 'quality_report_analysis') and st.session_state.quality_report_analysis:
+            json_analysis = st.session_state.quality_report_analysis
+        else:
+            # Look for JSON files in current directory
+            from utils.utils import find_quality_report, analyze_json_data
+            
+            file_path, report_data = find_quality_report()
+            
+            if file_path and report_data:
+                search_status.info(f"Found quality report: {file_path}")
+                json_analysis = analyze_json_data(report_data)
+                
+                # Store in session state for future use
+                st.session_state.quality_report_path = file_path
+                st.session_state.quality_report_analysis = json_analysis
+        
+        if json_analysis:
+            # Create a specialized prompt for quality analysis
+            retrieved_data = self._get_relevant_data(prompt) 
+            enhanced_prompt = self._create_quality_analysis_prompt(prompt, json_analysis, retrieved_data)
+        else:
+            # No JSON analysis available, use standard prompt format
+            metadatas, retrieved_data = self._perform_vector_search(prompt)
+            if not metadatas or not retrieved_data:
+                search_status.warning("No relevant information found.")
+                return
+                
+            enhanced_prompt = f"The prompt of the user is: \"{prompt}\". Answer it based on the following retrieved data: \n{retrieved_data}"
+        
+        # Call LLM for response
+        search_status.info("Generating response...")
+        self._generate_llm_response(enhanced_prompt, search_status)
+
+    def _handle_standard_query(self, prompt, search_status):
+        """
+        Handle a standard query.
+        
+        Args:
+            prompt (str): User's prompt
+            search_status: Status placeholder
+        """
+        # Perform vector search
+        metadatas, retrieved_data = self._perform_vector_search(prompt)
+        
+        if not metadatas or not retrieved_data:
+            search_status.warning("No relevant information found.")
+            return
+        
+        # Display search results
+        search_status.success("Found relevant information!")
+            
+        # Show retrieved data in sidebar
+        if metadatas and metadatas[0]:
+            with st.sidebar.expander("Retrieved Data", expanded=False):
+                st.dataframe(pd.DataFrame(metadatas[0]))
+        
+        # Call LLM for response
+        enhanced_prompt = f"The prompt of the user is: \"{prompt}\". Answer it based on the following retrieved data: \n{retrieved_data}"
+        search_status.info("Generating response...")
+        self._generate_llm_response(enhanced_prompt, search_status)
+
+    def _get_relevant_data(self, prompt):
+        """
+        Get relevant data for a query with optimized search.
+        
+        Args:
+            prompt (str): User's prompt
+            
+        Returns:
+            str: Retrieved data
+        """
+        metadatas, retrieved_data = self._perform_vector_search(prompt)
+        return retrieved_data if retrieved_data else "No relevant information found."
+
+    def _perform_vector_search(self, prompt):
+        """
+        Perform vector search with improved error handling.
+        
+        Args:
+            prompt (str): User's prompt
+            
+        Returns:
+            tuple: (metadatas, retrieved_data)
+        """
+        try:
+            # Try to perform the search with error handling
+            metadatas, retrieved_data = self.vector_search(
+                st.session_state.embedding_model,
+                prompt,
+                st.session_state.active_collections,
+                st.session_state.columns_to_answer,
+                st.session_state.number_docs_retrieval
+            )
+            
+            # Check if we got results
+            if not metadatas or not retrieved_data:
+                print("No results from vector search")
+                # Return empty but valid results instead of error
+                return [], ""
+                
+            return metadatas, retrieved_data
+        except Exception as e:
+            # Catch any remaining exceptions without crashing
+            print(f"Unexpected error in vector search: {str(e)}")
+            return [], ""
+
+    def _create_quality_analysis_prompt(self, prompt, json_analysis, retrieved_data):
+        """
+        Create a prompt for quality analysis.
+        
+        Args:
+            prompt (str): User's prompt
+            json_analysis (str): Quality report analysis
+            retrieved_data (str): Retrieved data
+            
+        Returns:
+            str: Formatted prompt
+        """
+        return f"""You are a professional code quality analyst and programming instructor. Analyze the following code quality issues and provide detailed explanations and solutions.
+
+    USER QUERY: {prompt}
+
+    CODE QUALITY ANALYSIS:
+    {json_analysis}
+
+    RELEVANT DOCUMENTATION:
+    {retrieved_data}
+
+    Provide a concise but thorough analysis focusing on:
+    1. Explaining what each error/violation means
+    2. Why it's important to fix it
+    3. How to fix it with example code where helpful
+
+    Prioritize the most important issues first and be educational in your explanations.
+    """
+
+    def _generate_llm_response(self, enhanced_prompt, search_status):
+        """
+        Generate and display LLM response with safer state handling.
+        
+        Args:
+            enhanced_prompt (str): Prompt for the LLM
+            search_status: Status placeholder
+        """
+        try:
+            # Generate response
+            search_status.info("Generating response from LLM...")
+            response = st.session_state.llm_model.generate_content(enhanced_prompt)
+            
+            # Clear the status message
+            search_status.empty()
+            
+            # Display the response
+            st.markdown(response)
+            
+            # Add to chat history with safer handling - truncate if extremely long
+            response_for_history = response
+            if response and isinstance(response, str) and len(response) > 10000:
+                # Keep beginning and end with ellipsis in the middle for very long responses
+                response_for_history = response[:5000] + "\n\n... [content truncated] ...\n\n" + response[-5000:]
+            
+            # Use a try/except block for the chat history update to handle potential subscription errors
+            try:
+                if "chat_history" in st.session_state:
+                    # Append to existing chat history
+                    chat_history = st.session_state.chat_history.copy()
+                    chat_history.append({"role": "assistant", "content": response_for_history})
+                    self._safe_update_state("chat_history", chat_history)
+                else:
+                    # Initialize chat history if it doesn't exist
+                    self._safe_update_state("chat_history", [{"role": "assistant", "content": response_for_history}])
+            except Exception as e:
+                print(f"Error updating chat history: {str(e)}")
+                # Don't fail if we can't update chat history
+                
+        except Exception as e:
+            error_message = f"Error from LLM: {str(e)}"
+            search_status.error(error_message)
+            
+            # Try to add error to chat history safely
+            try:
+                if "chat_history" in st.session_state:
+                    chat_history = st.session_state.chat_history.copy()
+                    chat_history.append({"role": "assistant", "content": error_message})
+                    self._safe_update_state("chat_history", chat_history)
+            except Exception as chat_error:
+                print(f"Error updating chat history with error message: {str(chat_error)}")
+
+    # Add this to the _process_user_input method to handle chat history more safely
     def _process_user_input(self, prompt):
         """
-        Process a new user input in the chatbot.
+        Process a new user input in the chatbot with improved error handling and display.
         
         Args:
             prompt (str): User's prompt
         """
-        # Add user message to chat history
-        st.session_state.chat_history.append({"role": USER, "content": prompt})
-        with st.chat_message(USER):
+        # Add user message to chat history with safe update
+        try:
+            if "chat_history" in st.session_state:
+                chat_history = st.session_state.chat_history.copy()
+                chat_history.append({"role": "user", "content": prompt})
+                self._safe_update_state("chat_history", chat_history)
+            else:
+                self._safe_update_state("chat_history", [{"role": "user", "content": prompt}])
+        except Exception as e:
+            print(f"Error updating chat history with user message: {str(e)}")
+        
+        # Display user message
+        with st.chat_message("user"):
             st.markdown(prompt)
 
-        with st.chat_message(ASSISTANT):
+        # Continue with assistant response
+        with st.chat_message("assistant"):
             if not st.session_state.columns_to_answer:
                 st.warning("Please select columns for the chatbot to answer from.")
                 return
@@ -767,101 +1178,28 @@ class ConfigManager:
             search_status.info("Searching for relevant information...")
             
             try:
-                # Perform vector search
-                metadatas, retrieved_data = self.vector_search(
-                    st.session_state.embedding_model,
-                    prompt,
-                    st.session_state.active_collections,
-                    st.session_state.columns_to_answer,
-                    st.session_state.number_docs_retrieval
-                )
-                
-                if not metadatas or not retrieved_data:
-                    search_status.warning("No relevant information found.")
-                    return
-                
                 # Check if this is a code quality analysis request
                 is_quality_analysis = any(kw in prompt.lower() for kw in 
                                         ["error", "violation", "quality", "build", "checkstyle", 
                                         "fix", "issue", "improve", "code problem"])
                 
-                # Handle quality analysis
+                # Prepare LLM prompt based on query type
                 if is_quality_analysis:
-                    search_status.info("Analyzing code quality information...")
-                    
-                    # Check for quality report analysis in session state
-                    json_analysis = ""
-                    if hasattr(st.session_state, 'quality_report_analysis') and st.session_state.quality_report_analysis:
-                        json_analysis = st.session_state.quality_report_analysis
-                    else:
-                        # Look for JSON files in current directory
-                        from utils.utils import find_quality_report, analyze_json_data
-                        
-                        file_path, report_data = find_quality_report()
-                        
-                        if file_path and report_data:
-                            search_status.info(f"Found quality report: {file_path}")
-                            json_analysis = analyze_json_data(report_data)
-                            
-                            # Store in session state for future use
-                            st.session_state.quality_report_path = file_path
-                            st.session_state.quality_report_analysis = json_analysis
-                    
-                    if json_analysis:
-                        # Create a specialized prompt for quality analysis
-                        enhanced_prompt = f"""You are a professional code quality analyst and programming instructor. Analyze the following code quality issues and provide detailed explanations and solutions.
-
-    USER QUERY: {prompt}
-
-    CODE QUALITY ANALYSIS:
-    {json_analysis}
-
-    DATA RETRIEVAL:
-    {retrieved_data}
-
-    Please provide a comprehensive analysis of the build errors and checkstyle violations found in the report. For each issue:
-    1. Explain what the error or violation means in simple terms
-    2. Explain why it's important to fix it (impact on code quality, reliability, etc.)
-    3. Provide a step-by-step solution to fix the issue
-    4. If possible, show both the incorrect code and the corrected code
-
-    Also include a summary of the overall code quality issues and general recommendations for improving the code. 
-    Be educational and helpful, as if you're teaching a student how to write better code."""
-                    else:
-                        # No JSON analysis available, use standard prompt format
-                        enhanced_prompt = f"The prompt of the user is: \"{prompt}\". Answer it based on the following retrieved data: \n{retrieved_data}"
+                    self._handle_quality_analysis_query(prompt, search_status)
                 else:
-                    # Use standard prompt format for non-quality analysis queries
-                    enhanced_prompt = f"The prompt of the user is: \"{prompt}\". Answer it based on the following retrieved data: \n{retrieved_data}"
-                
-                # Display search results
-                search_status.success("Found relevant information!")
-                    
-                # Show retrieved data in sidebar
-                st.sidebar.subheader("Retrieved Data")
-                if metadatas and metadatas[0]:
-                    st.sidebar.dataframe(pd.DataFrame(metadatas[0]))
-                
-                # If quality analysis, also show quality report in sidebar
-                if is_quality_analysis and hasattr(st.session_state, 'quality_report_analysis') and st.session_state.quality_report_analysis:
-                    with st.sidebar.expander("Quality Report Analysis"):
-                        st.text_area("Analysis", st.session_state.quality_report_analysis, height=200)
-                
-                # Call LLM for response
-                try:
-                    search_status.info("Generating response...")
-                    response = st.session_state.llm_model.generate_content(enhanced_prompt)
-                    search_status.empty()
-                    st.markdown(response)
-                    st.session_state.chat_history.append({"role": ASSISTANT, "content": response})
-                except Exception as e:
-                    search_status.error(f"Error from LLM: {str(e)}")
+                    self._handle_standard_query(prompt, search_status)
             
             except Exception as e:
                 search_status.error(f"An error occurred: {str(e)}")
-                import traceback
-                st.error(traceback.format_exc())
-
+                # Add shorter error message to chat history safely
+                try:
+                    if "chat_history" in st.session_state:
+                        chat_history = st.session_state.chat_history.copy()
+                        chat_history.append({"role": "assistant", "content": f"Error: {str(e)}"})
+                        self._safe_update_state("chat_history", chat_history)
+                except Exception as chat_error:
+                    print(f"Error updating chat history with error: {str(chat_error)}")
+            
     def get_llm_options(self):
         """
         Return LLM options dictionary.
@@ -946,3 +1284,22 @@ class ConfigManager:
         
         # Format and return
         return template.format(query=query, context=context)
+    
+    def _safe_update_state(self, key, value):
+        """
+        Safely update session state to avoid subscription errors.
+        
+        Args:
+            key (str): The state key to update
+            value: The value to set
+        """
+        try:
+            if key in st.session_state:
+                current_value = st.session_state[key]
+                # Only update if the value is different to avoid unnecessary state changes
+                if current_value != value:
+                    st.session_state[key] = value
+            else:
+                st.session_state[key] = value
+        except Exception as e:
+            print(f"Error updating state {key}: {str(e)}")
